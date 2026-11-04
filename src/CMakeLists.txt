@@ -2,6 +2,11 @@ idf_component_register(
     SRCS 
         "main.c"
         "grainfather_g30.c"
+        "config_store.c"
+        "wifi_manager.c"
+        "mqtt_manager.c"
+        "ble_manager.c"
+        "web_server.c"
     INCLUDE_DIRS 
         "."
         "../include"
@@ -11,6 +16,7 @@ idf_component_register(
         esp_event 
         esp_netif 
         esp_http_client 
+        esp_http_server
         mqtt 
         bt 
         freertos 

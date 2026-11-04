@@ -42,6 +42,37 @@ void test_max_simultaneous_connections_limit(void) {
     TEST_ASSERT_GREATER_OR_EQUAL_INT(3, BLE_MAX_SIMULTANEOUS_CONNECTIONS);
 }
 
+void test_ble_peer_and_scan_structures(void) {
+    ble_peer_device_t peer;
+    memset(&peer, 0, sizeof(peer));
+    peer.conn_handle = 1;
+    peer.addr_type = 0;
+    peer.rssi = -70;
+    peer.connected = true;
+    peer.equipment_type = EQUIPMENT_TYPE_BOILER;
+    strncpy(peer.device_name, "Grainfather G30", sizeof(peer.device_name) - 1);
+
+    TEST_ASSERT_EQUAL_UINT16(1, peer.conn_handle);
+    TEST_ASSERT_EQUAL_INT8(-70, peer.rssi);
+    TEST_ASSERT_TRUE(peer.connected);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", peer.device_name);
+
+    ble_scan_entry_t scan;
+    memset(&scan, 0, sizeof(scan));
+    scan.is_grainfather = true;
+    scan.equipment_type = EQUIPMENT_TYPE_BOILER;
+    strncpy(scan.name, "Grainfather", sizeof(scan.name) - 1);
+    TEST_ASSERT_TRUE(scan.is_grainfather);
+    TEST_ASSERT_EQUAL_STRING("Grainfather", scan.name);
+}
+
+void test_wifi_ap_configuration_defines(void) {
+    TEST_ASSERT_EQUAL_STRING("BrewLink-Setup", WIFI_AP_SSID_PREFIX);
+    TEST_ASSERT_EQUAL_INT(1, WIFI_AP_CHANNEL);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, WIFI_AP_MAX_CONN);
+    TEST_ASSERT_EQUAL_INT(80, WEB_SERVER_PORT);
+}
+
 // =============================================================================
 // Grainfather G30 Notification Parsing Tests (BLE -> Gateway / WiFi)
 // =============================================================================
@@ -269,6 +300,8 @@ int main(int argc, char **argv) {
     // Baseline tests
     RUN_TEST(test_telemetry_packet_structure);
     RUN_TEST(test_max_simultaneous_connections_limit);
+    RUN_TEST(test_ble_peer_and_scan_structures);
+    RUN_TEST(test_wifi_ap_configuration_defines);
 
     // G30 Notification Parsing tests
     RUN_TEST(test_g30_parse_temperature_notification);

@@ -24,6 +24,7 @@ extern "C" {
 typedef struct {
     uint16_t         conn_handle;
     uint8_t          addr[6];
+    uint8_t          addr_type;
     int8_t           rssi;
     bool             connected;
     bool             services_discovered;
@@ -32,6 +33,17 @@ typedef struct {
     equipment_type_t equipment_type;
     char             device_name[32];
 } ble_peer_device_t;
+
+// Structure for advertising BLE peripherals discovered during scanning
+typedef struct {
+    uint8_t          addr[6];
+    uint8_t          addr_type;
+    int8_t           rssi;
+    char             name[32];
+    bool             is_grainfather;
+    equipment_type_t equipment_type;
+    bool             is_connected;
+} ble_scan_entry_t;
 
 // Structure for telemetry data queued from BLE to WiFi/MQTT relay
 typedef struct {
@@ -57,6 +69,16 @@ typedef struct {
 
 #define CMD_DISPATCH_TASK_STACK_SIZE        4096
 #define CMD_DISPATCH_TASK_PRIORITY          5
+
+// =============================================================================
+// Wi-Fi Setup SoftAP & Web Server Configuration
+// =============================================================================
+#define WIFI_AP_SSID_PREFIX                 "BrewLink-Setup"
+#define WIFI_AP_CHANNEL                     1
+#define WIFI_AP_MAX_CONN                    4
+#define WIFI_STA_MAX_RETRIES                5
+#define WEB_SERVER_PORT                     80
+#define WEB_SERVER_STACK_SIZE               8192
 
 // =============================================================================
 // MQTT Topics & QoS

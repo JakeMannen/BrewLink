@@ -112,3 +112,26 @@ When sending telemetry via HTTP POST:
    esp_http_client_cleanup(client);
    ```
    **Rule**: Always call `esp_http_client_cleanup()` after request completion to prevent leaking LwIP sockets.
+
+---
+
+## 5. SoftAP Onboarding & Web Configuration Server
+
+### 5.1. Fallback & AP Broadcast Rules
+*   When no Wi-Fi credentials exist in NVS or if station connection attempts fail (`WIFI_STA_MAX_RETRIES`), activate SoftAP broadcast: `BrewLink-Setup-XXXX` (using last 4 hex characters of the MAC address).
+*   Network mode: `WIFI_MODE_APSTA` allows the setup SoftAP to remain active while simultaneously performing scans for surrounding Wi-Fi networks and attempting station connections.
+*   SoftAP IP: Default gateway `192.168.4.1`, open authentication for zero-friction user onboarding.
+
+### 5.2. Web Configuration Server Endpoints (`esp_http_server`)
+*   `GET /`: Serves embedded single-page application (SPA) in HTML5/CSS/JS with zero external CDN dependencies.
+*   `GET /generate_204`, `/hotspot-detect.html`: Captive portal redirects returning `302 Found` to `http://192.168.4.1/`.
+*   `GET /api/status`: System overview (Wi-Fi status, IP, MQTT broker status, BLE connected count, free heap, uptime).
+*   `GET /api/wifi/scan`: Triggers active Wi-Fi AP scan and returns JSON array of discovered SSIDs, RSSIs, and auth modes.
+*   `POST /api/wifi/connect`: Accepts `{"ssid":"...","password":"..."}`, saves to NVS via `config_store`, and connects.
+*   `GET /api/mqtt`: Returns current MQTT broker URI and connection status.
+*   `POST /api/mqtt`: Accepts `{"broker_uri":"...","username":"...","password":"...","topic_prefix":"..."}`, persists to NVS, and dynamically reconfigures MQTT client.
+*   `GET /api/ble/peers`: Returns JSON list of connected BLE peripherals (MAC, name, equipment type, RSSI).
+*   `GET /api/ble/scan`: Triggers active BLE discovery scan and returns discovered equipment (with Grainfather G30 auto-detection).
+*   `POST /api/ble/connect`: Accepts `{"addr":"...","addr_type":0}` and establishes BLE connection.
+*   `POST /api/ble/disconnect`: Accepts `{"conn_handle":X}` and terminates connection.
+*   `POST /api/system/restart`: Schedules a graceful gateway reboot.
