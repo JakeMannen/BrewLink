@@ -12,7 +12,7 @@
 #include "freertos/semphr.h"
 
 #include "nimble/nimble_port.h"
-#include "nimble/nimble_port_esp.h"
+#include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -244,7 +244,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                                  entry->addr[4], entry->addr[5]);
                     }
                     entry->is_grainfather = is_g30;
-                    entry->equipment_type = is_g30 ? EQUIPMENT_TYPE_BOILER : EQUIPMENT_TYPE_GENERIC;
+                    entry->equipment_type = is_g30 ? EQUIPMENT_TYPE_BOILER : EQUIPMENT_TYPE_UNKNOWN;
                     entry->is_connected = (find_peer_by_handle(BLE_HS_CONN_HANDLE_NONE) != -1);
                 }
                 xSemaphoreGive(s_ble_mutex);

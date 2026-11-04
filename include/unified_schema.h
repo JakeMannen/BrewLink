@@ -19,6 +19,9 @@ typedef enum {
     EQUIPMENT_TYPE_COOLER_HEATER = 3  // Glycol chillers, heating belts/jackets
 } equipment_type_t;
 
+#define EQUIPMENT_TYPE_GENERIC       EQUIPMENT_TYPE_UNKNOWN
+#define EQUIPMENT_TYPE_COOLER        EQUIPMENT_TYPE_COOLER_HEATER
+
 // =============================================================================
 // Unified Boiler State Schema (e.g. Grainfather G30)
 // =============================================================================

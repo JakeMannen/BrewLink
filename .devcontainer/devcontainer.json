@@ -6,9 +6,6 @@
   "runArgs": [
     "--privileged"
   ],
-  "mounts": [
-    "source=/dev,target=/dev,type=bind"
-  ],
   "customizations": {
     "vscode": {
       "settings": {
