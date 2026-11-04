@@ -1,0 +1,11 @@
+{
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "platformio-ide.useBuiltinPIOCore": false,
+  "files.associations": {
+    "*.h": "c",
+    "*.c": "c",
+    "sdkconfig.defaults": "kconfig",
+    "partitions.csv": "csv"
+  },
+  "C_Cpp.default.configurationProvider": "platformio.platformio-ide"
+}

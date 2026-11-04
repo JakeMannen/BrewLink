@@ -10,15 +10,41 @@ This document provides mandatory operational guidelines, architectural rules, an
 *   **Role**: Senior Embedded Systems & IoT Architect.
 *   **Core Objective**: Develop production-grade firmware for the **Adafruit HUZZAH32 Feather (ESP-WROOM-32)** running **native ESP-IDF**. The device acts as a **BLE Central / GATT Client** maintaining simultaneous connections to **at least 3 external equipment devices**, collecting telemetry via GATT notifications, and relaying the data out via **WiFi (MQTT / HTTP)**.
 *   **Version Control**: Strict **GitHub Flow**.
-*   **Development Environment**: **PlatformIO inside Devcontainer**.
+*   **Development Environment**: **VS Code with Dev Containers (`ms-vscode-remote.remote-containers`) & PlatformIO IDE (`platformio.platformio-ide`)**.
 
 ---
 
-## 2. PlatformIO & Devcontainer Workflow
+## 2. VS Code, Dev Containers & PlatformIO Workflow
 
-All builds, checks, and commands must be executed within the Devcontainer using PlatformIO CLI.
+This project is strictly developed within **Visual Studio Code (VS Code)** using the **Dev Containers** extension (`ms-vscode-remote.remote-containers`) and the **PlatformIO IDE** extension (`platformio.platformio-ide`). 
 
-### 2.1. Standard Commands
+### 2.1. VS Code Container Lifecycle
+1.  **Opening the Project in VS Code**:
+    *   When the repository is opened in VS Code on the host machine, VS Code detects `.devcontainer/devcontainer.json` and prompts to **"Reopen in Container"** (or execute command palette `> Dev Containers: Reopen in Container`).
+    *   The container builds from `.devcontainer/Dockerfile` based on Ubuntu 22.04 with pre-installed PlatformIO Core (`pio`), Python 3, toolchains, and USB udev rules.
+2.  **Integrated Terminal**:
+    *   All terminal sessions opened in VS Code (`Ctrl+` `) execute directly inside the Devcontainer as user `vscode`.
+    *   The environment variable `$PATH` includes `/home/vscode/.platformio/penv/bin`, ensuring `pio` CLI is immediately available.
+3.  **C/C++ IntelliSense in VS Code**:
+    *   Managed by the `platformio.platformio-ide` extension acting as the `C_Cpp.default.configurationProvider`.
+    *   **Rule for Agents**: NEVER manually edit or commit `.vscode/c_cpp_properties.json`. If header index warnings occur, instruct the user or run:
+        ```bash
+        pio init --ide vscode
+        ```
+        or use the VS Code Command Palette: `> PlatformIO: Rebuild C/C++ Index`.
+
+### 2.2. VS Code PlatformIO IDE GUI & Shortcuts
+Developers can use either the PlatformIO CLI in the VS Code terminal or the built-in GUI:
+*   **VS Code Status Bar (Bottom)**:
+    *   `✓` (Checkmark): Build firmware (`pio run -e featheresp32`)
+    *   `→` (Right Arrow): Upload / Flash to connected Feather (`pio run -e featheresp32 -t upload`)
+    *   `🔌` (Plug Icon): Open Serial Monitor at 115200 baud (`pio device monitor -b 115200`)
+    *   `🗑` (Trash Can): Clean build artifacts (`pio run -t clean`)
+*   **PlatformIO Activity Bar (Alien Icon)**:
+    *   **Project Tasks -> featheresp32**: Fast access to Build, Upload, Monitor, and Size inspection.
+    *   **Project Tasks -> featheresp32 -> Platform -> Run Menuconfig**: Launches interactive ESP-IDF configuration.
+
+### 2.3. Standard CLI Commands (Inside VS Code Terminal)
 *   **Compile Target Firmware**:
     ```bash
     pio run -e featheresp32
@@ -40,17 +66,26 @@ All builds, checks, and commands must be executed within the Devcontainer using 
     pio run -t menuconfig
     ```
 
-### 2.2. Flashing & Hardware Communication
-*   Inside the devcontainer, USB serial ports are mounted via `/dev/` (e.g. `/dev/ttyUSB0` or `/dev/ttyACM0`).
-*   To flash from inside devcontainer (when USB passthrough is active):
-    ```bash
-    pio run -e featheresp32 -t upload
-    ```
-*   Serial monitor with backtrace decoding:
-    ```bash
-    pio device monitor -b 115200
-    ```
-*   If the agent is operating in an isolated sandbox where hardware USB is unavailable, compile and verify the build (`pio run -e featheresp32`), then provide the exact flash command for the user to execute.
+### 2.4. Flashing & Hardware Communication via VS Code
+*   **Linux / Direct Mount**: USB serial ports are mounted directly via `/dev/` (e.g. `/dev/ttyUSB0` or `/dev/ttyACM0`) through `devcontainer.json`.
+*   **Windows Host with WSL2 / Docker Desktop**:
+    *   Forward the Adafruit Feather USB port (Silicon Labs CP2104) to WSL2/Docker using `usbipd-win`:
+        ```powershell
+        usbipd list
+        usbipd bind --busid <BUSID>
+        usbipd attach --wsl --busid <BUSID>
+        ```
+    *   Inside the VS Code Devcontainer, verify the port is visible:
+        ```bash
+        pio device list
+        ```
+    *   Flash directly:
+        ```bash
+        pio run -e featheresp32 -t upload
+        ```
+*   **When Hardware USB is Unavailable to the Agent**:
+    *   Compile and verify the build inside the container (`pio run -e featheresp32`).
+    *   Provide the exact flash command for the user to execute from their host or attached terminal.
 
 ---
 

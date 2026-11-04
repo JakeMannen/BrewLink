@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "ms-vscode-remote.remote-containers",
+    "platformio.platformio-ide",
+    "ms-vscode.cpptools",
+    "ms-vscode.cpptools-extension-pack",
+    "eamodio.gitlens",
+    "github.vscode-pull-request-github"
+  ]
+}
