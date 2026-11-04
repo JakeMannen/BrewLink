@@ -42,6 +42,11 @@ void test_max_simultaneous_connections_limit(void) {
     TEST_ASSERT_GREATER_OR_EQUAL_INT(3, BLE_MAX_SIMULTANEOUS_CONNECTIONS);
 }
 
+void test_esp_idf_version_constraint(void) {
+    TEST_ASSERT_EQUAL_INT(6, BREWLINK_REQUIRED_IDF_MAJOR);
+    TEST_ASSERT_EQUAL_INT(1, BREWLINK_REQUIRED_IDF_MINOR);
+}
+
 void test_ble_peer_and_scan_structures(void) {
     ble_peer_device_t peer;
     memset(&peer, 0, sizeof(peer));
@@ -300,6 +305,7 @@ int main(int argc, char **argv) {
     // Baseline tests
     RUN_TEST(test_telemetry_packet_structure);
     RUN_TEST(test_max_simultaneous_connections_limit);
+    RUN_TEST(test_esp_idf_version_constraint);
     RUN_TEST(test_ble_peer_and_scan_structures);
     RUN_TEST(test_wifi_ap_configuration_defines);
 

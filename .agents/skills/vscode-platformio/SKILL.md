@@ -1,12 +1,12 @@
 ---
 name: vscode-platformio
 description: >-
-  Build, check, flash, monitor, and analyze memory for the Adafruit HUZZAH32 ESP-IDF firmware within the VS Code Devcontainer using PlatformIO.
+  Build, check, flash, monitor, and analyze memory for the Adafruit HUZZAH32 ESP-IDF v6.1 firmware within the VS Code Devcontainer using PlatformIO.
 ---
 
 # VS Code PlatformIO & Devcontainer Workflow Skill
 
-This skill guides the agent through compiling, flashing, monitoring, testing, and debugging the BrewLink firmware inside the VS Code Devcontainer.
+This skill guides the agent through compiling, flashing, monitoring, testing, and debugging the BrewLink firmware (targeting ESP-IDF v6.1) inside the VS Code Devcontainer.
 
 ---
 
@@ -92,3 +92,19 @@ If operating in an isolated sandbox, run compilation (`pio run -e featheresp32`)
     pio init --ide vscode
     ```
     or trigger the VS Code Command Palette action: `> PlatformIO: Rebuild C/C++ Index`.
+
+---
+
+## 5. ESP-IDF Official Documentation & Architecture References
+
+Consult the official Espressif documentation for architectural deep-dives, hardware driver APIs, cryptography, and component guidelines:
+
+*   **Primary Documentation Portal**:
+    *   [ESP-IDF Programming Guide (ESP32 Stable)](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/index.html)
+*   **API Reference & Guides**:
+    *   [ESP-IDF API Reference](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/index.html) — Core system APIs (FreeRTOS, timers, heaps, logging), storage (NVS, partitions), networking, and peripherals.
+    *   [ESP-IDF API Guides](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/index.html) — Technical architectural guides including Wi-Fi driver architecture, thread local storage, host testing, and multi-core mechanics.
+*   **Security Guides**:
+    *   [ESP-IDF Security Guides](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/security/index.html) — Comprehensive security guides covering Secure Boot, Flash Encryption, hardware crypto accelerators, anti-rollback protection, and Wi-Fi security (PMF / WPA3).
+*   **Libraries & Frameworks**:
+    *   [ESP-IDF Libraries and Frameworks](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/libraries-and-frameworks/index.html) — Middleware, protocols (ESP-TLS, Mbed TLS, MQTT, HTTP), and component integrations.
