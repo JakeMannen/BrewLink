@@ -1,12 +1,14 @@
 # Workspace Instructions for Gemini & Antigravity
 
-This workspace operates under the authoritative rules and guidelines defined in [AGENTS.md](./AGENTS.md).
+This workspace operates under the authoritative rules and skills defined in [AGENTS.md](./AGENTS.md) and `.agents/`.
 
-Please refer to [AGENTS.md](./AGENTS.md) for full instructions regarding:
-1. Target Hardware (Adafruit HUZZAH32 ESP-WROOM-32) & Native ESP-IDF architecture.
-2. VS Code with Dev Containers (`ms-vscode-remote.remote-containers`) & PlatformIO IDE (`platformio.platformio-ide`).
-3. Multi-Device BLE Central (NimBLE) connecting to >= 3 peripherals simultaneously.
-4. WiFi, MQTT, and HTTP Outbound Relay architecture.
-5. Dual-core FreeRTOS task assignment and memory/heap management.
-6. GitHub Flow branching, conventional commits, and PR checklist.
-7. Secrets management policies.
+### 1. Mandatory Rules
+*   [`01-embedded-constraints.md`](.agents/rules/01-embedded-constraints.md) — ESP-WROOM-32 specs, Core 0 / Core 1 task pinning, memory & heap discipline.
+*   [`02-coding-standards.md`](.agents/rules/02-coding-standards.md) — ESP-IDF idioms, `esp_err_t` checking, tagged logging, thread safety.
+*   [`03-security-secrets.md`](.agents/rules/03-security-secrets.md) — Secrets hygiene and `secrets.h` exclusion.
+*   [`04-github-flow.md`](.agents/rules/04-github-flow.md) — Branching standards, conventional commits, and PR verification.
+
+### 2. Operational Skills
+*   [`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md) — VS Code Devcontainer, PlatformIO CLI builds, check, flash, monitor, size, and tests.
+*   [`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md) — NimBLE Central connecting to >= 3 peripherals simultaneously, GATT discovery, and queue handoff.
+*   [`outbound-relay`](.agents/skills/outbound-relay/SKILL.md) — WiFi station, MQTT client with LWT, HTTP client, and Core 1 dispatch task.

@@ -1,0 +1,94 @@
+---
+name: vscode-platformio
+description: >-
+  Build, check, flash, monitor, and analyze memory for the Adafruit HUZZAH32 ESP-IDF firmware within the VS Code Devcontainer using PlatformIO.
+---
+
+# VS Code PlatformIO & Devcontainer Workflow Skill
+
+This skill guides the agent through compiling, flashing, monitoring, testing, and debugging the BrewLink firmware inside the VS Code Devcontainer.
+
+---
+
+## 1. Environment Verification
+
+1. Verify that commands run inside the devcontainer terminal as user `vscode`:
+   ```bash
+   whoami
+   pio --version
+   ```
+2. Verify that PlatformIO Core is available on the `$PATH` (`/home/vscode/.platformio/penv/bin`).
+
+---
+
+## 2. Standard Build & Verification Procedures
+
+### 2.1. Compile Firmware
+To compile the `featheresp32` target:
+```bash
+pio run -e featheresp32
+```
+
+### 2.2. Static Code Analysis
+Run static analysis with PlatformIO check:
+```bash
+pio check
+```
+
+### 2.3. Memory & Partition Inspection
+To verify RAM (SRAM) and Flash consumption against available limits:
+```bash
+pio run -e featheresp32 -t size
+```
+
+### 2.4. Host Unit Testing
+Run native unit tests (Unity framework) on desktop/container without hardware attached:
+```bash
+pio test -e native
+```
+
+### 2.5. ESP-IDF Menuconfig
+Launch interactive menuconfig:
+```bash
+pio run -t menuconfig
+```
+
+---
+
+## 3. Flashing & Hardware Communication
+
+### 3.1. USB Passthrough from Host (Windows / WSL2)
+If running on Windows host, attach the Adafruit Feather USB port (Silicon Labs CP2104) to WSL2/Docker:
+```powershell
+usbipd list
+usbipd bind --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+
+### 3.2. Direct Flashing from Devcontainer
+1. Check that the port is mounted:
+   ```bash
+   pio device list
+   ```
+2. Flash firmware to connected Feather:
+   ```bash
+   pio run -e featheresp32 -t upload
+   ```
+3. Open serial monitor at 115200 baud with backtrace decoding:
+   ```bash
+   pio device monitor -b 115200
+   ```
+
+### 3.3. When Flashing Hardware is Unavailable to Agent
+If operating in an isolated sandbox, run compilation (`pio run -e featheresp32`) and instruct the user to execute the flash command from their VS Code terminal.
+
+---
+
+## 4. IntelliSense & VS Code Index Management
+
+*   **Rule**: Do NOT manually create or edit `.vscode/c_cpp_properties.json`.
+*   If header indexing warnings occur, regenerate the index via PlatformIO:
+    ```bash
+    pio init --ide vscode
+    ```
+    or trigger the VS Code Command Palette action: `> PlatformIO: Rebuild C/C++ Index`.
