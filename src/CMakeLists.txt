@@ -21,5 +21,5 @@ idf_component_register(
         bt 
         freertos 
         log 
-        json
+        cjson
 )

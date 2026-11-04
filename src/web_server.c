@@ -42,7 +42,7 @@ static const char *equipment_type_to_str(equipment_type_t type) {
     switch (type) {
         case EQUIPMENT_TYPE_BOILER:    return "boiler";
         case EQUIPMENT_TYPE_FERMENTER: return "fermenter";
-        case EQUIPMENT_TYPE_COOLER:    return "cooler";
+        case EQUIPMENT_TYPE_COOLER_HEATER: return "cooler";
         default:                       return "generic";
     }
 }
