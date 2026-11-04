@@ -1,0 +1,286 @@
+/**
+ * @file grainfather_g30.c
+ * @brief Grainfather G30 Connect BLE Protocol Parser & Command Encoder
+ * @details Conforms to BrewLink embedded constraints (no dynamic memory allocations)
+ */
+
+#include "grainfather_g30.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#include "esp_timer.h"
+static const char *TAG = "G30_CODEC";
+#endif
+
+// =============================================================================
+// Helper: Interaction Descriptions
+// =============================================================================
+const char* g30_get_interaction_message(uint8_t code) {
+    switch (code) {
+        case 0:
+            return "Normal operation";
+        case 1:
+            return "Strike temperature reached: Add grain";
+        case 2:
+            return "Mash step finished: Sparge alert";
+        case 3:
+            return "Boil temperature reached: Add first hops";
+        case 4:
+            return "Boil addition alert: Add timed hops/adjuncts";
+        case 5:
+            return "Boil finished: Start cooling";
+        default:
+            return "User interaction required";
+    }
+}
+
+// =============================================================================
+// Format Fixed 19-Character Command Buffer
+// =============================================================================
+esp_err_t g30_format_padded_cmd(const char *cmd_str, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (cmd_str == NULL || out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t in_len = strlen(cmd_str);
+    if (in_len > G30_COMMAND_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Copy command bytes
+    memcpy(out_buf, cmd_str, in_len);
+
+    // Pad trailing bytes with spaces (ASCII 0x20)
+    memset(out_buf + in_len, ' ', G30_COMMAND_LEN - in_len);
+    out_buf[G30_COMMAND_LEN] = '\0';
+
+    return ESP_OK;
+}
+
+// =============================================================================
+// Command Encoder (Unified Command -> G30 19-Byte Command)
+// =============================================================================
+esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (cmd == NULL || out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    memset(raw_cmd, 0, sizeof(raw_cmd));
+
+    switch (cmd->action) {
+        case CMD_ACTION_SET_PUMP:
+            snprintf(raw_cmd, sizeof(raw_cmd), "%s", cmd->params.pump_state ? "L1" : "L0");
+            break;
+
+        case CMD_ACTION_SET_HEAT:
+            snprintf(raw_cmd, sizeof(raw_cmd), "%s", cmd->params.heat.heat_state ? "K1" : "K0");
+            break;
+
+        case CMD_ACTION_SET_TARGET_TEMP:
+            // Format: "$XX.X," or "$XX," - trailing comma is mandatory
+            if ((int)(cmd->params.target_temp_c * 10) % 10 == 0) {
+                snprintf(raw_cmd, sizeof(raw_cmd), "$%u,", (unsigned int)cmd->params.target_temp_c);
+            } else {
+                snprintf(raw_cmd, sizeof(raw_cmd), "$%.1f,", cmd->params.target_temp_c);
+            }
+            break;
+
+        case CMD_ACTION_SET_TIMER:
+            snprintf(raw_cmd, sizeof(raw_cmd), "S%u", cmd->params.timer_duration_min);
+            break;
+
+        case CMD_ACTION_PAUSE_TIMER:
+        case CMD_ACTION_RESUME_TIMER:
+            snprintf(raw_cmd, sizeof(raw_cmd), "G");
+            break;
+
+        case CMD_ACTION_CANCEL_TIMER:
+            snprintf(raw_cmd, sizeof(raw_cmd), "C");
+            break;
+
+        case CMD_ACTION_ACK_INTERACTION:
+            snprintf(raw_cmd, sizeof(raw_cmd), "I");
+            break;
+
+        case CMD_ACTION_DISMISS_ALERT:
+            snprintf(raw_cmd, sizeof(raw_cmd), "A");
+            break;
+
+        case CMD_ACTION_CANCEL_SESSION:
+            snprintf(raw_cmd, sizeof(raw_cmd), "Q1");
+            break;
+
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+// =============================================================================
+// Recipe Command Encoders
+// =============================================================================
+esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (recipe == NULL || out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    // Layout: R{boil_min},{step_count},{mash_water},{sparge_water},
+    snprintf(raw_cmd, sizeof(raw_cmd), "R%u,%u,%.1f,%.1f,",
+             recipe->boil_time_min,
+             recipe->mash_step_count,
+             recipe->mash_water_l,
+             recipe->sparge_water_l);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (step == NULL || out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    // Layout: {temp_c}:{duration_min}
+    snprintf(raw_cmd, sizeof(raw_cmd), "%u:%u",
+             (unsigned int)step->temp_c,
+             step->duration_min);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    snprintf(raw_cmd, sizeof(raw_cmd), "%u", boil_time_remaining_min);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+// =============================================================================
+// Notification Parser (BLE Notification ASCII -> Unified State)
+// =============================================================================
+esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
+                                 unified_boiler_state_t *state,
+                                 g30_notification_type_t *out_type) {
+    if (data == NULL || len == 0 || state == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char buf[64];
+    size_t copy_len = len < (sizeof(buf) - 1) ? len : (sizeof(buf) - 1);
+    memcpy(buf, data, copy_len);
+    buf[copy_len] = '\0';
+
+    char prefix = buf[0];
+    const char *payload = &buf[1];
+
+    if (out_type != NULL) {
+        *out_type = (g30_notification_type_t)prefix;
+    }
+
+    switch (prefix) {
+        case G30_NOTIF_TEMPERATURE: { // X{Target},{Current}
+            float target = 0.0f, current = 0.0f;
+            if (sscanf(payload, "%f,%f", &target, &current) == 2) {
+                state->target_temp_c = target;
+                state->current_temp_c = current;
+            } else {
+                return ESP_ERR_INVALID_ARG;
+            }
+            break;
+        }
+
+        case G30_NOTIF_SYSTEM_STATE: { // Y{Heat},{Pump},{Auto},{Ramp},{InterMode},{InterCode},{Stage},{Delayed}
+            int heat = 0, pump = 0, auto_m = 0, ramp = 0, inter_m = 0, inter_c = 0, stage = 0, del = 0;
+            int count = sscanf(payload, "%d,%d,%d,%d,%d,%d,%d,%d",
+                               &heat, &pump, &auto_m, &ramp, &inter_m, &inter_c, &stage, &del);
+            if (count >= 6) {
+                state->heat_active = (heat == 1);
+                state->pump_active = (pump == 1);
+                state->auto_mode = (auto_m == 1);
+                state->ramp_active = (ramp == 1);
+                state->interaction.required = (inter_m == 1);
+                state->interaction.code = (uint8_t)inter_c;
+                strncpy(state->interaction.message, g30_get_interaction_message((uint8_t)inter_c),
+                        sizeof(state->interaction.message) - 1);
+                state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+                state->stage.step_index = (uint8_t)stage;
+            } else {
+                return ESP_ERR_INVALID_ARG;
+            }
+            break;
+        }
+
+        case G30_NOTIF_TIMER: { // T{Active},{LeftMin},{TotalMin},{LeftSec}
+            int active = 0, left_min = 0, tot_min = 0, left_sec = 0;
+            int count = sscanf(payload, "%d,%d,%d,%d", &active, &left_min, &tot_min, &left_sec);
+            if (count >= 3) {
+                state->timer.active = (active == 1);
+                state->timer.remaining_seconds = (uint32_t)(left_sec > 0 ? left_sec : (left_min * 60));
+                state->timer.total_seconds = (uint32_t)(tot_min * 60);
+            } else {
+                return ESP_ERR_INVALID_ARG;
+            }
+            break;
+        }
+
+        case G30_NOTIF_POWER_FLAGS: { // W{PwrPct},{Paused},{StepMash},{Interrupted},{ManualPwr},{SpargeAlert}
+            int pwr = 0, paused = 0;
+            int count = sscanf(payload, "%d,%d", &pwr, &paused);
+            if (count >= 2) {
+                state->heat_power_pct = (uint8_t)pwr;
+                state->timer.paused = (paused == 1);
+            } else {
+                return ESP_ERR_INVALID_ARG;
+            }
+            break;
+        }
+
+        case G30_NOTIF_INTERACTION: { // I{InteractionCode}
+            int code = 0;
+            if (sscanf(payload, "%d", &code) == 1) {
+                state->interaction.required = true;
+                state->interaction.code = (uint8_t)code;
+                strncpy(state->interaction.message, g30_get_interaction_message((uint8_t)code),
+                        sizeof(state->interaction.message) - 1);
+                state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+            } else {
+                return ESP_ERR_INVALID_ARG;
+            }
+            break;
+        }
+
+        case G30_NOTIF_BOIL_TEMP: { // C{BoilTemp}
+            float boil_t = 100.0f;
+            if (sscanf(payload, "%f", &boil_t) == 1) {
+                state->boil_temp_c = boil_t;
+            } else {
+                return ESP_ERR_INVALID_ARG;
+            }
+            break;
+        }
+
+        case G30_NOTIF_ERROR: { // E{ErrorCode}
+            // Error logged
+            break;
+        }
+
+        default:
+            return ESP_ERR_NOT_SUPPORTED;
+    }
+
+#ifdef ESP_PLATFORM
+    state->last_updated_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+#endif
+
+    return ESP_OK;
+}

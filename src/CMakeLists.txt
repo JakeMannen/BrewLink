@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS 
         "main.c"
+        "grainfather_g30.c"
     INCLUDE_DIRS 
         "."
         "../include"

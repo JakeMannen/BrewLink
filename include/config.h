@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "unified_schema.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,13 +22,15 @@ extern "C" {
 
 // Structure tracking each connected BLE peripheral peer
 typedef struct {
-    uint16_t conn_handle;
-    uint8_t  addr[6];
-    int8_t   rssi;
-    bool     connected;
-    bool     services_discovered;
-    uint16_t notify_val_handle;
-    char     device_name[32];
+    uint16_t         conn_handle;
+    uint8_t          addr[6];
+    int8_t           rssi;
+    bool             connected;
+    bool             services_discovered;
+    uint16_t         notify_val_handle;
+    uint16_t         write_val_handle;
+    equipment_type_t equipment_type;
+    char             device_name[32];
 } ble_peer_device_t;
 
 // Structure for telemetry data queued from BLE to WiFi/MQTT relay
@@ -45,21 +48,29 @@ typedef struct {
 // FreeRTOS Queues & Core Pinning
 // =============================================================================
 #define TELEMETRY_QUEUE_LENGTH              32
+#define BLE_CMD_QUEUE_LENGTH                16
 #define NETWORKING_TASK_CORE                0    // Core 0: BLE, WiFi, MQTT, LwIP
-#define APP_PROCESSING_TASK_CORE            1    // Core 1: Parsing, state machine, sensor logic
+#define APP_PROCESSING_TASK_CORE            1    // Core 1: Parsing, state machine, dispatch
 
 #define RELAY_TASK_STACK_SIZE               4096
 #define RELAY_TASK_PRIORITY                 5
+
+#define CMD_DISPATCH_TASK_STACK_SIZE        4096
+#define CMD_DISPATCH_TASK_PRIORITY          5
 
 // =============================================================================
 // MQTT Topics & QoS
 // =============================================================================
 #define MQTT_TOPIC_STATUS                   "brewlink/gateway/status"
-#define MQTT_TOPIC_TELEMETRY_PREFIX         "brewlink/device/"
-#define MQTT_TOPIC_CMD                      "brewlink/gateway/cmd"
+#define MQTT_TOPIC_GATEWAY_CMD              "brewlink/gateway/cmd"
+#define MQTT_TOPIC_DEVICE_PREFIX            "brewlink/device/"
+#define MQTT_TOPIC_TELEMETRY_SUFFIX         "/telemetry"
+#define MQTT_TOPIC_CMD_SUFFIX               "/cmd"
+#define MQTT_TOPIC_CMD_WILDCARD             "brewlink/device/+/cmd"
 
 #define MQTT_QOS_TELEMETRY                  0
 #define MQTT_QOS_STATUS                     1
+#define MQTT_QOS_COMMAND                    1
 
 #ifdef __cplusplus
 }
