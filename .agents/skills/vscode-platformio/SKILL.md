@@ -1,12 +1,12 @@
 ---
 name: vscode-platformio
 description: >-
-  Build, check, flash, monitor, and analyze memory for the Adafruit HUZZAH32 ESP-IDF firmware within the VS Code Devcontainer using PlatformIO.
+  Build, check, flash, monitor, and analyze memory for the Adafruit HUZZAH32 ESP-IDF v6.1 firmware within the VS Code Devcontainer using PlatformIO.
 ---
 
 # VS Code PlatformIO & Devcontainer Workflow Skill
 
-This skill guides the agent through compiling, flashing, monitoring, testing, and debugging the BrewLink firmware inside the VS Code Devcontainer.
+This skill guides the agent through compiling, flashing, monitoring, testing, and debugging the BrewLink firmware (targeting ESP-IDF v6.1) inside the VS Code Devcontainer.
 
 ---
 

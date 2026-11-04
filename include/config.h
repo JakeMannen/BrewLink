@@ -10,6 +10,19 @@ extern "C" {
 #endif
 
 // =============================================================================
+// ESP-IDF Framework Version Constraint (v6.1)
+// =============================================================================
+#define BREWLINK_REQUIRED_IDF_MAJOR         6
+#define BREWLINK_REQUIRED_IDF_MINOR         1
+
+#if defined(ESP_PLATFORM)
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(BREWLINK_REQUIRED_IDF_MAJOR, BREWLINK_REQUIRED_IDF_MINOR, 0)
+#warning "BrewLink requires ESP-IDF v6.1 or newer. Running on an older ESP-IDF version may cause compatibility issues."
+#endif
+#endif
+
+// =============================================================================
 // BLE Central Multi-Device Configuration
 // =============================================================================
 #define BLE_MAX_SIMULTANEOUS_CONNECTIONS    3
