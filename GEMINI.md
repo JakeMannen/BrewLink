@@ -12,3 +12,4 @@ This workspace operates under the authoritative rules and skills defined in [AGE
 *   [`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md) — VS Code Devcontainer, PlatformIO CLI builds, check, flash, monitor, size, and tests.
 *   [`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md) — NimBLE Central connecting to >= 3 peripherals simultaneously, GATT discovery, and queue handoff.
 *   [`outbound-relay`](.agents/skills/outbound-relay/SKILL.md) — WiFi station, MQTT client with LWT, HTTP client, and Core 1 dispatch task.
+*   [`grainfather-g30-ble`](.agents/skills/grainfather-g30-ble/SKILL.md) — Grainfather G30 Connect BLE protocol, 19-byte padded commands, notification parsing, recipe sequence, and unified schemas.
