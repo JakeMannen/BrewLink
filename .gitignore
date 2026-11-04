@@ -1,0 +1,44 @@
+# PlatformIO
+.pio
+.pioenvs
+.piolibdeps
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+build/
+
+# IDE & Editor settings
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Compilation and analysis databases
+compile_commands.json
+.cache/
+.clangd/
+
+# Secrets and credentials
+include/secrets.h
+*secrets*.h
+*.pem
+*.key
+*.crt
+
+# OS specific files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class

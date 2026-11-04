@@ -1,0 +1,36 @@
+{
+  "name": "ESP32 PlatformIO Devcontainer (BrewLink)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    "--privileged"
+  ],
+  "mounts": [
+    "source=/dev,target=/dev,type=bind"
+  ],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "platformio-ide.useBuiltinPIOCore": false,
+        "platformio-ide.customPATH": "/home/vscode/.platformio/penv/bin",
+        "files.associations": {
+          "*.h": "c",
+          "*.c": "c",
+          "sdkconfig.defaults": "kconfig"
+        },
+        "C_Cpp.default.configurationProvider": "platformio.platformio-ide"
+      },
+      "extensions": [
+        "platformio.platformio-ide",
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack",
+        "eamodio.gitlens",
+        "github.vscode-pull-request-github"
+      ]
+    }
+  },
+  "remoteUser": "vscode",
+  "postCreateCommand": "pio --version"
+}
