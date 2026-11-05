@@ -451,6 +451,91 @@ void test_compatibility_full_advertisement_check(void) {
 }
 
 // =============================================================================
+// G30 Web Controller & Recipe Conversion Validation Tests
+// =============================================================================
+void test_g30_web_recipe_conversion_and_encoding(void) {
+    unified_recipe_t recipe;
+    memset(&recipe, 0, sizeof(recipe));
+    strncpy(recipe.name, "Grainfather Pale Ale", sizeof(recipe.name) - 1);
+    recipe.boil_time_min = 60;
+    recipe.mash_water_l = 16.5f;
+    recipe.sparge_water_l = 14.0f;
+    recipe.mash_step_count = 2;
+    recipe.mash_steps[0].temp_c = 65.0f;
+    recipe.mash_steps[0].duration_min = 60;
+    recipe.mash_steps[1].temp_c = 75.0f;
+    recipe.mash_steps[1].duration_min = 10;
+    recipe.boil_addition_count = 2;
+    recipe.boil_additions_min[0] = 60;
+    recipe.boil_additions_min[1] = 15;
+
+    char header[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_header(&recipe, header));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(header));
+    TEST_ASSERT_EQUAL_STRING("R60,2,16.5,14.0,  ", header);
+
+    char step1[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[0], step1));
+    TEST_ASSERT_EQUAL_STRING("65:60              ", step1);
+
+    char step2[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[1], step2));
+    TEST_ASSERT_EQUAL_STRING("75:10              ", step2);
+
+    char boil1[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(recipe.boil_additions_min[0], boil1));
+    TEST_ASSERT_EQUAL_STRING("60                 ", boil1);
+
+    char boil2[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(recipe.boil_additions_min[1], boil2));
+    TEST_ASSERT_EQUAL_STRING("15                 ", boil2);
+}
+
+void test_g30_web_control_actions_mapping(void) {
+    char buf[G30_COMMAND_LEN + 1];
+    unified_command_t cmd;
+
+    // Pump control
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_PUMP;
+    cmd.params.pump_state = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("L1                 ", buf);
+
+    cmd.params.pump_state = false;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("L0                 ", buf);
+
+    // Heat control
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_HEAT;
+    cmd.params.heat.heat_state = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("K1                 ", buf);
+
+    cmd.params.heat.heat_state = false;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("K0                 ", buf);
+
+    // Set target temp decimal & integer
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_TARGET_TEMP;
+    cmd.params.target_temp_c = 65.5f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("$65.5,             ", buf);
+
+    cmd.params.target_temp_c = 100.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("$100,              ", buf);
+
+    // Acknowledge interaction prompt
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_ACK_INTERACTION;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("I                  ", buf);
+}
+
+// =============================================================================
 // Test Runner Entrypoint
 // =============================================================================
 int main(int argc, char **argv) {
@@ -490,6 +575,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compatibility_rejects_non_g30_equipment);
     RUN_TEST(test_compatibility_rejects_incompatible_devices);
     RUN_TEST(test_compatibility_full_advertisement_check);
+
+    // G30 Web Controller & Recipe tests
+    RUN_TEST(test_g30_web_recipe_conversion_and_encoding);
+    RUN_TEST(test_g30_web_control_actions_mapping);
 
     return UNITY_END();
 }

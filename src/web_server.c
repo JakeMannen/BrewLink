@@ -18,6 +18,8 @@
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "ble_manager.h"
+#include "grainfather_g30.h"
+#include "g30_controller.h"
 #include "web_page.h"
 
 static const char *TAG = "WEB_SERVER";
@@ -421,6 +423,263 @@ static esp_err_t api_ble_disconnect_post_handler(httpd_req_t *req) {
     return httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"BLE disconnect initiated\"}", HTTPD_RESP_USE_STRLEN);
 }
 
+// -----------------------------------------------------------------------------
+// Grainfather G30 Controller REST Handlers
+// -----------------------------------------------------------------------------
+
+// GET /api/g30/status - Get connected G30 status & telemetry
+static esp_err_t api_g30_status_get_handler(httpd_req_t *req) {
+    unified_boiler_state_t state;
+    bool connected = false;
+    uint8_t mac[6] = {0};
+    int8_t rssi = 0;
+
+    esp_err_t err = g30_controller_get_state(&state, &connected, mac, &rssi);
+    if (err != ESP_OK) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "connected", connected);
+
+    if (connected) {
+        char mac_str[18];
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        cJSON_AddStringToObject(root, "mac", mac_str);
+        cJSON_AddStringToObject(root, "model", "Grainfather G30 Connect");
+        cJSON_AddNumberToObject(root, "rssi", rssi);
+
+        cJSON *st = cJSON_AddObjectToObject(root, "state");
+        cJSON_AddNumberToObject(st, "current_temp_c", (double)state.current_temp_c);
+        cJSON_AddNumberToObject(st, "target_temp_c", (double)state.target_temp_c);
+        cJSON_AddNumberToObject(st, "boil_temp_c", (double)state.boil_temp_c);
+        cJSON_AddBoolToObject(st, "heat_active", state.heat_active);
+        cJSON_AddNumberToObject(st, "heat_power_pct", state.heat_power_pct);
+        cJSON_AddBoolToObject(st, "pump_active", state.pump_active);
+        cJSON_AddBoolToObject(st, "auto_mode", state.auto_mode);
+        cJSON_AddBoolToObject(st, "ramp_active", state.ramp_active);
+
+        cJSON *tm = cJSON_AddObjectToObject(st, "timer");
+        cJSON_AddBoolToObject(tm, "active", state.timer.active);
+        cJSON_AddBoolToObject(tm, "paused", state.timer.paused);
+        cJSON_AddNumberToObject(tm, "remaining_seconds", state.timer.remaining_seconds);
+        cJSON_AddNumberToObject(tm, "total_seconds", state.timer.total_seconds);
+
+        cJSON *sg = cJSON_AddObjectToObject(st, "stage");
+        cJSON_AddNumberToObject(sg, "step_index", state.stage.step_index);
+        cJSON_AddStringToObject(sg, "step_name", state.stage.step_name[0] ? state.stage.step_name : (state.auto_mode ? "Recipe Step" : "Manual"));
+
+        cJSON *ia = cJSON_AddObjectToObject(st, "interaction");
+        cJSON_AddBoolToObject(ia, "required", state.interaction.required);
+        cJSON_AddNumberToObject(ia, "code", state.interaction.code);
+        cJSON_AddStringToObject(ia, "message", state.interaction.message[0] ? state.interaction.message : g30_get_interaction_message(state.interaction.code));
+    } else {
+        cJSON_AddStringToObject(root, "message", "No Grainfather G30 currently connected");
+    }
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+    esp_err_t ret = httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+    free(json_str);
+    return ret;
+}
+
+// POST /api/g30/control - Manual pump, heat, target temp controls
+static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
+    char buf[256];
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid content length");
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, buf, remaining);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *action_item = cJSON_GetObjectItem(root, "action");
+    if (!cJSON_IsString(action_item) || action_item->valuestring == NULL) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'action'");
+        return ESP_FAIL;
+    }
+
+    const char *action_str = action_item->valuestring;
+    unified_command_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.equipment_type = EQUIPMENT_TYPE_BOILER;
+    strncpy(cmd.req_id, "web-cmd", sizeof(cmd.req_id) - 1);
+
+    bool valid = false;
+    if (strcmp(action_str, "set_pump") == 0) {
+        cmd.action = CMD_ACTION_SET_PUMP;
+        cJSON *st = cJSON_GetObjectItem(root, "state");
+        cmd.params.pump_state = (st && cJSON_IsTrue(st));
+        valid = true;
+    } else if (strcmp(action_str, "set_heat") == 0) {
+        cmd.action = CMD_ACTION_SET_HEAT;
+        cJSON *st = cJSON_GetObjectItem(root, "state");
+        cJSON *pwr = cJSON_GetObjectItem(root, "power_pct");
+        cmd.params.heat.heat_state = (st && cJSON_IsTrue(st));
+        cmd.params.heat.power_pct = (pwr && cJSON_IsNumber(pwr)) ? (uint8_t)pwr->valueint : 100;
+        valid = true;
+    } else if (strcmp(action_str, "set_target_temp") == 0) {
+        cmd.action = CMD_ACTION_SET_TARGET_TEMP;
+        cJSON *temp = cJSON_GetObjectItem(root, "temp_c");
+        if (temp && cJSON_IsNumber(temp)) {
+            cmd.params.target_temp_c = (float)temp->valuedouble;
+            valid = true;
+        }
+    } else if (strcmp(action_str, "ack_interaction") == 0) {
+        cmd.action = CMD_ACTION_ACK_INTERACTION;
+        valid = true;
+    } else if (strcmp(action_str, "dismiss_alert") == 0) {
+        cmd.action = CMD_ACTION_DISMISS_ALERT;
+        valid = true;
+    } else if (strcmp(action_str, "cancel_session") == 0) {
+        cmd.action = CMD_ACTION_CANCEL_SESSION;
+        valid = true;
+    }
+
+    cJSON_Delete(root);
+
+    if (!valid) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid action or parameters");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = g30_controller_dispatch_command(&cmd);
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Grainfather G30 is not connected");
+        return ESP_FAIL;
+    } else if (err == ESP_ERR_NO_MEM) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Command queue full; please retry");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to execute G30 command");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Command dispatched to Grainfather G30\"}", HTTPD_RESP_USE_STRLEN);
+}
+
+// POST /api/g30/recipe - Enqueue BeerXML converted recipe to Grainfather G30
+static esp_err_t api_g30_recipe_post_handler(httpd_req_t *req) {
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining > 2048) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recipe payload size must be between 1 and 2048 bytes");
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(remaining + 1);
+    if (buf == NULL) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, buf, remaining);
+    if (ret <= 0) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    // Check optional wrapper object "recipe"
+    cJSON *rec = cJSON_GetObjectItem(root, "recipe");
+    if (rec == NULL) {
+        rec = root;
+    }
+
+    cJSON *name_item = cJSON_GetObjectItem(rec, "name");
+    cJSON *boil_item = cJSON_GetObjectItem(rec, "boil_time_min");
+    cJSON *mash_w_item = cJSON_GetObjectItem(rec, "mash_water_l");
+    cJSON *sparge_w_item = cJSON_GetObjectItem(rec, "sparge_water_l");
+    cJSON *steps_item = cJSON_GetObjectItem(rec, "mash_steps");
+    cJSON *hops_item = cJSON_GetObjectItem(rec, "boil_additions_min");
+
+    unified_recipe_t recipe;
+    memset(&recipe, 0, sizeof(recipe));
+
+    if (name_item && cJSON_IsString(name_item) && name_item->valuestring != NULL) {
+        strncpy(recipe.name, name_item->valuestring, sizeof(recipe.name) - 1);
+    } else {
+        strncpy(recipe.name, "Brew Recipe", sizeof(recipe.name) - 1);
+    }
+
+    recipe.boil_time_min = (boil_item && cJSON_IsNumber(boil_item)) ? (uint16_t)boil_item->valueint : 60;
+    recipe.mash_water_l = (mash_w_item && cJSON_IsNumber(mash_w_item)) ? (float)mash_w_item->valuedouble : 16.5f;
+    recipe.sparge_water_l = (sparge_w_item && cJSON_IsNumber(sparge_w_item)) ? (float)sparge_w_item->valuedouble : 14.0f;
+
+    // Mash steps
+    if (steps_item && cJSON_IsArray(steps_item)) {
+        int count = cJSON_GetArraySize(steps_item);
+        recipe.mash_step_count = count > MAX_MASH_STEPS ? MAX_MASH_STEPS : count;
+        for (int i = 0; i < recipe.mash_step_count; i++) {
+            cJSON *s = cJSON_GetArrayItem(steps_item, i);
+            cJSON *t = cJSON_GetObjectItem(s, "temp_c");
+            cJSON *d = cJSON_GetObjectItem(s, "duration_min");
+            recipe.mash_steps[i].temp_c = (t && cJSON_IsNumber(t)) ? (float)t->valuedouble : 65.0f;
+            recipe.mash_steps[i].duration_min = (d && cJSON_IsNumber(d)) ? (uint16_t)d->valueint : 60;
+        }
+    }
+
+    // Boil additions
+    if (hops_item && cJSON_IsArray(hops_item)) {
+        int count = cJSON_GetArraySize(hops_item);
+        recipe.boil_addition_count = count > MAX_BOIL_ADDITIONS ? MAX_BOIL_ADDITIONS : count;
+        for (int i = 0; i < recipe.boil_addition_count; i++) {
+            cJSON *h = cJSON_GetArrayItem(hops_item, i);
+            recipe.boil_additions_min[i] = (h && cJSON_IsNumber(h)) ? (uint16_t)h->valueint : 0;
+        }
+    }
+
+    cJSON_Delete(root);
+
+    if (recipe.mash_step_count == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recipe must contain at least one mash step");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = g30_controller_dispatch_recipe(&recipe);
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Grainfather G30 is not connected");
+        return ESP_FAIL;
+    } else if (err == ESP_ERR_NO_MEM) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Command queue full; please retry");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to queue recipe to Grainfather G30");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Recipe successfully queued to Grainfather G30\"}", HTTPD_RESP_USE_STRLEN);
+}
+
 // POST /api/system/restart - Reboot ESP32
 static void delayed_restart_task(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -447,7 +706,7 @@ esp_err_t web_server_start(void) {
     config.server_port = WEB_SERVER_PORT;
     config.core_id = NETWORKING_TASK_CORE;
     config.stack_size = WEB_SERVER_STACK_SIZE;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 24;
     config.lru_purge_enable = true;
 
     ESP_LOGI(TAG, "Starting HTTP configuration server on port %d...", config.server_port);
@@ -557,6 +816,28 @@ esp_err_t web_server_start(void) {
         .handler = api_system_restart_post_handler
     };
     httpd_register_uri_handler(s_server, &uri_sys_restart);
+
+    // Grainfather G30 Endpoints
+    httpd_uri_t uri_g30_status = {
+        .uri = "/api/g30/status",
+        .method = HTTP_GET,
+        .handler = api_g30_status_get_handler
+    };
+    httpd_register_uri_handler(s_server, &uri_g30_status);
+
+    httpd_uri_t uri_g30_control = {
+        .uri = "/api/g30/control",
+        .method = HTTP_POST,
+        .handler = api_g30_control_post_handler
+    };
+    httpd_register_uri_handler(s_server, &uri_g30_control);
+
+    httpd_uri_t uri_g30_recipe = {
+        .uri = "/api/g30/recipe",
+        .method = HTTP_POST,
+        .handler = api_g30_recipe_post_handler
+    };
+    httpd_register_uri_handler(s_server, &uri_g30_recipe);
 
     ESP_LOGI(TAG, "HTTP configuration server successfully registered all endpoints");
     return ESP_OK;
