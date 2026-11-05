@@ -12,7 +12,7 @@ This is the primary governance document for Antigravity and any AI assistant ope
 *   **Framework**: **Native ESP-IDF** (v6.1) managed via PlatformIO.
 *   **Core Mission**: Maintain simultaneous BLE Central connections to **at least 3 external equipment devices** (Boilers, Fermenters, Coolers/Heaters), provide bidirectional control (read temperatures/states, write pump/heating controls, transfer brew recipes), map device telemetry to unified data schemas, and relay telemetry out over **WiFi (MQTT / HTTP)**. Initial scope focuses on the **Grainfather G30 Connect**, architected for multi-equipment expansion.
 *   **Development Environment**: **VS Code with Dev Containers (`ms-vscode-remote.remote-containers`) & PlatformIO IDE (`platformio.platformio-ide`)**.
-*   **Version Control**: Strict **GitHub Flow**.
+*   **Version Control**: Strict **GitHub Flow** (never push to `main`, never force push, new branches from updated `main`).
 
 ---
 
@@ -85,6 +85,9 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
     *   Never commit credentials, SSIDs, passwords, or tokens.
     *   Real secrets remain in `include/secrets.h` (gitignored). Keep `include/secrets.example.h` updated.
 4.  **[GitHub Flow & Version Control](.agents/rules/04-github-flow.md)**:
+    *   **Never push to `main`**; all changes reach `main` exclusively via Pull Requests.
+    *   **Never force push** (`--force` or `--force-with-lease`).
+    *   **Always start a new session/feature in a new branch from updated `main`** (`git checkout main && git pull origin main`) unless stated otherwise.
     *   `main` is always stable and passing CI.
     *   Short-lived branches off `main` (`feat/*`, `fix/*`, `chore/*`).
     *   Conventional Commit messages and PR templates with hardware testing notes.

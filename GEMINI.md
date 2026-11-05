@@ -6,7 +6,7 @@ This workspace operates under the authoritative rules and skills defined in [AGE
 *   [`01-embedded-constraints.md`](.agents/rules/01-embedded-constraints.md) — ESP-WROOM-32 specs, ESP-IDF 6.1 framework constraint, Core 0 / Core 1 task pinning, memory & heap discipline.
 *   [`02-coding-standards.md`](.agents/rules/02-coding-standards.md) — ESP-IDF idioms, `esp_err_t` checking, tagged logging, thread safety.
 *   [`03-security-secrets.md`](.agents/rules/03-security-secrets.md) — Secrets hygiene and `secrets.h` exclusion.
-*   [`04-github-flow.md`](.agents/rules/04-github-flow.md) — Branching standards, conventional commits, and PR verification.
+*   [`04-github-flow.md`](.agents/rules/04-github-flow.md) — Git safety rules (never push to main, never force push, new session/feature on branch from updated main), branching standards, conventional commits, and PR verification.
 
 ### 2. Operational Skills
 *   [`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md) — VS Code Devcontainer, PlatformIO CLI builds, check, flash, monitor, size, and tests.
