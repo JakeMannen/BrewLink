@@ -157,15 +157,30 @@ void test_g30_parse_interaction_notification(void) {
     unified_boiler_state_t state;
     memset(&state, 0, sizeof(state));
 
-    const uint8_t notif_data[] = "I1";
+    // When water is cold (e.g. 23C vs 67C target), I1 is the initial prompt
+    state.target_temp_c = 67.0f;
+    state.current_temp_c = 23.0f;
+    const uint8_t notif_cold[] = "I1";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
-    esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
+    esp_err_t err = g30_parse_notification(notif_cold, strlen((char*)notif_cold), &state, &type);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_INT(G30_NOTIF_INTERACTION, type);
     TEST_ASSERT_TRUE(state.interaction.required);
     TEST_ASSERT_EQUAL_UINT8(1, state.interaction.code);
+    TEST_ASSERT_EQUAL_STRING("Add mash water & Press SET to start heating", state.interaction.message);
+
+    // When water is heated to strike temperature (67C), I1 prompts to add grain
+    state.current_temp_c = 67.0f;
+    err = g30_parse_notification(notif_cold, strlen((char*)notif_cold), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
+
+    // Other interaction code (e.g. I2)
+    const uint8_t notif_sparge[] = "I2";
+    err = g30_parse_notification(notif_sparge, strlen((char*)notif_sparge), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash step finished: Sparge alert", state.interaction.message);
 }
 
 void test_g30_parse_boil_temp_notification(void) {
