@@ -79,7 +79,7 @@ static void publish_equipment_manifest(const ble_peer_device_t *peer, bool conne
              peer->addr[0], peer->addr[1], peer->addr[2],
              peer->addr[3], peer->addr[4], peer->addr[5]);
 
-    char manifest[512];
+    char manifest[768];
     if (connected) {
         snprintf(manifest, sizeof(manifest),
                  "{\"event\":\"connected\",\"gateway_id\":\"%s\",\"mac\":\"%s\","
@@ -523,7 +523,7 @@ static void on_mqtt_connection_status_change(bool connected) {
                          peers[i].addr[0], peers[i].addr[1], peers[i].addr[2],
                          peers[i].addr[3], peers[i].addr[4], peers[i].addr[5]);
 
-                char snapshot_json[512];
+                char snapshot_json[768];
                 snprintf(snapshot_json, sizeof(snapshot_json),
                          "{\"mac\":\"%s\",\"equipment_type\":\"boiler\",\"model\":\"%s\","
                          "\"rssi\":%d,\"state\":{"
@@ -578,7 +578,7 @@ static void on_wifi_sta_status_change(bool connected, const char *ip) {
 // -----------------------------------------------------------------------------
 static void telemetry_relay_task(void *pvParameters) {
     ble_telemetry_packet_t packet;
-    char payload_json[512];
+    char payload_json[768];
 
     ESP_LOGI(TAG, "Telemetry relay task active on core %d", xPortGetCoreID());
 
