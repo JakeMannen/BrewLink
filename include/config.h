@@ -54,6 +54,8 @@ typedef struct {
     int8_t           rssi;
     char             name[32];
     bool             is_grainfather;
+    bool             is_compatible;      // Verified compatible equipment defined in sourcecode
+    char             model[32];          // Model name from sourcecode definition
     equipment_type_t equipment_type;
     bool             is_connected;
 } ble_scan_entry_t;
@@ -76,7 +78,6 @@ typedef struct {
 #define BLE_CMD_QUEUE_LENGTH                16
 #define NETWORKING_TASK_CORE                0    // Core 0: BLE, WiFi, MQTT, LwIP
 #define APP_PROCESSING_TASK_CORE            1    // Core 1: Parsing, state machine, dispatch
-
 #define RELAY_TASK_STACK_SIZE               4096
 #define RELAY_TASK_PRIORITY                 5
 

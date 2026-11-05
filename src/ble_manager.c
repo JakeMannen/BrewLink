@@ -4,6 +4,7 @@
  */
 
 #include "ble_manager.h"
+#include "ble_compatibility.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -206,7 +207,25 @@ static int ble_on_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *er
     if (error->status == 0 && service != NULL) {
         if (ble_uuid_cmp(&service->uuid.u, &s_g30_svc_uuid.u) == 0) {
             ESP_LOGI(TAG, "Discovered G30 Primary Service (0xCDD0). Discovering characteristics...");
+            if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                int peer_idx = find_peer_by_handle(conn_handle);
+                if (peer_idx >= 0) {
+                    s_peers[peer_idx].services_discovered = true;
+                    s_peers[peer_idx].equipment_type = EQUIPMENT_TYPE_BOILER;
+                }
+                xSemaphoreGive(s_ble_mutex);
+            }
             ble_gattc_disc_all_chrs(conn_handle, service->start_handle, service->end_handle, ble_on_disc_chr, NULL);
+        }
+    } else if (service == NULL) {
+        // Discovery finished; verify if a compatible service was found
+        if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            int peer_idx = find_peer_by_handle(conn_handle);
+            if (peer_idx >= 0 && !s_peers[peer_idx].services_discovered) {
+                ESP_LOGW(TAG, "Connected device on handle %d offers no compatible brewing service; disconnecting", conn_handle);
+                ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+            xSemaphoreGive(s_ble_mutex);
         }
     }
     return 0;
@@ -241,10 +260,39 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 dev_name[cpy_len] = '\0';
             }
 
-            bool is_g30 = false;
-            if (strncmp(dev_name, G30_DEVICE_NAME_PREFIX, strlen(G30_DEVICE_NAME_PREFIX)) == 0) {
-                is_g30 = true;
+            uint16_t adv_u16[8];
+            size_t num_u16 = 0;
+            if (rc == 0 && fields.uuids16 != NULL && fields.num_uuids16 > 0) {
+                num_u16 = fields.num_uuids16 < 8 ? fields.num_uuids16 : 8;
+                for (size_t i = 0; i < num_u16; i++) {
+                    adv_u16[i] = fields.uuids16[i].value;
+                }
             }
+
+            uint8_t adv_u128[4 * BLE_UUID128_LEN];
+            size_t num_u128 = 0;
+            if (rc == 0 && fields.uuids128 != NULL && fields.num_uuids128 > 0) {
+                num_u128 = fields.num_uuids128 < 4 ? fields.num_uuids128 : 4;
+                for (size_t i = 0; i < num_u128; i++) {
+                    memcpy(&adv_u128[i * BLE_UUID128_LEN], fields.uuids128[i].value, BLE_UUID128_LEN);
+                }
+            }
+
+            const ble_compatible_device_t *compat = NULL;
+            bool is_compat = ble_compatibility_is_device_compatible(
+                dev_name,
+                (num_u16 > 0) ? adv_u16 : NULL, num_u16,
+                (num_u128 > 0) ? adv_u128 : NULL, num_u128,
+                &compat
+            );
+
+            // Filter: ONLY connectable devices defined in sourcecode are recorded
+            if (!is_compat || compat == NULL) {
+                return 0;
+            }
+
+            bool is_g30 = (compat->equipment_type == EQUIPMENT_TYPE_BOILER &&
+                           (strstr(compat->model_name, "Grainfather") != NULL));
 
             // Record in scan table
             if (xSemaphoreTake(s_ble_mutex, 0) == pdTRUE) {
@@ -261,10 +309,10 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     if (dev_name[0] != '\0') {
                         strncpy(s_scan_entries[found_idx].name, dev_name, sizeof(s_scan_entries[found_idx].name) - 1);
                     }
-                    if (is_g30) {
-                        s_scan_entries[found_idx].is_grainfather = true;
-                        s_scan_entries[found_idx].equipment_type = EQUIPMENT_TYPE_BOILER;
-                    }
+                    s_scan_entries[found_idx].is_grainfather = is_g30;
+                    s_scan_entries[found_idx].is_compatible = true;
+                    s_scan_entries[found_idx].equipment_type = compat->equipment_type;
+                    strncpy(s_scan_entries[found_idx].model, compat->model_name, sizeof(s_scan_entries[found_idx].model) - 1);
                 } else if (s_scan_count < BLE_SCAN_MAX_RESULTS) {
                     ble_scan_entry_t *entry = &s_scan_entries[s_scan_count++];
                     memcpy(entry->addr, event->disc.addr.val, 6);
@@ -273,11 +321,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     if (dev_name[0] != '\0') {
                         strncpy(entry->name, dev_name, sizeof(entry->name) - 1);
                     } else {
-                        snprintf(entry->name, sizeof(entry->name), "BLE-%02X%02X",
-                                 entry->addr[4], entry->addr[5]);
+                        strncpy(entry->name, compat->model_name, sizeof(entry->name) - 1);
                     }
                     entry->is_grainfather = is_g30;
-                    entry->equipment_type = is_g30 ? EQUIPMENT_TYPE_BOILER : EQUIPMENT_TYPE_UNKNOWN;
+                    entry->is_compatible = true;
+                    entry->equipment_type = compat->equipment_type;
+                    strncpy(entry->model, compat->model_name, sizeof(entry->model) - 1);
                     entry->is_connected = (find_peer_by_handle(BLE_HS_CONN_HANDLE_NONE) != -1);
                 }
                 xSemaphoreGive(s_ble_mutex);
@@ -476,9 +525,34 @@ esp_err_t ble_manager_get_scan_results(ble_scan_entry_t *out_entries, uint16_t m
     return ESP_OK;
 }
 
+bool ble_manager_is_addr_compatible(const uint8_t *addr) {
+    if (addr == NULL) {
+        return false;
+    }
+
+    bool compat = false;
+    if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (int i = 0; i < s_scan_count; i++) {
+            if (memcmp(s_scan_entries[i].addr, addr, 6) == 0) {
+                compat = s_scan_entries[i].is_compatible;
+                break;
+            }
+        }
+        xSemaphoreGive(s_ble_mutex);
+    }
+    return compat;
+}
+
 esp_err_t ble_manager_connect(const uint8_t *addr, uint8_t addr_type) {
     if (addr == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    // Enforce compatibility check: only devices verified as compatible defined in sourcecode can be connected
+    if (!ble_manager_is_addr_compatible(addr)) {
+        ESP_LOGW(TAG, "Connection rejected: %02X:%02X:%02X:%02X:%02X:%02X is not a compatible device defined in sourcecode",
+                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     if (s_is_scanning) {
@@ -490,7 +564,7 @@ esp_err_t ble_manager_connect(const uint8_t *addr, uint8_t addr_type) {
     target_addr.type = addr_type;
     memcpy(target_addr.val, addr, 6);
 
-    ESP_LOGI(TAG, "Initiating BLE connection to %02X:%02X:%02X:%02X:%02X:%02X (type=%d)...",
+    ESP_LOGI(TAG, "Initiating BLE connection to compatible device %02X:%02X:%02X:%02X:%02X:%02X (type=%d)...",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr_type);
 
     int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &target_addr, 30000, NULL, ble_gap_event, NULL);

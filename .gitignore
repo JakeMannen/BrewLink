@@ -30,6 +30,8 @@ compile_commands.json
 # Secrets and credentials
 include/secrets.h
 *secrets*.h
+!include/secrets.example.h
+!secrets.example.h
 *.pem
 *.key
 *.crt
