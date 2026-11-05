@@ -547,6 +547,9 @@ static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
     } else if (strcmp(action_str, "ack_interaction") == 0) {
         cmd.action = CMD_ACTION_ACK_INTERACTION;
         valid = true;
+    } else if (strcmp(action_str, "press_set") == 0) {
+        cmd.action = CMD_ACTION_PRESS_SET;
+        valid = true;
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
         cmd.action = CMD_ACTION_DISMISS_ALERT;
         valid = true;

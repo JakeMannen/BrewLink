@@ -405,6 +405,9 @@ static void process_inbound_command(const char *topic, const char *payload, int 
     } else if (strcmp(action_str, "ack_interaction") == 0) {
         cmd.action = CMD_ACTION_ACK_INTERACTION;
         handled = true;
+    } else if (strcmp(action_str, "press_set") == 0) {
+        cmd.action = CMD_ACTION_PRESS_SET;
+        handled = true;
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
         cmd.action = CMD_ACTION_DISMISS_ALERT;
         handled = true;

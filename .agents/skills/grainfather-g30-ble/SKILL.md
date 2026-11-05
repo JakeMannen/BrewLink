@@ -149,7 +149,9 @@ The G30 Controller pushes ASCII notification strings on characteristic `0003cdd1
 
 ### 4.2. Interaction Codes
 * `0`: Normal operation / Idle.
-* `1`: Heat strike water ready (prompt: "Add grain").
+* `1`: Mash prompt:
+  * Prior to heating (`heat_active == 0` and `current_temp < target_temp`): "Add mash water & Press SET to start heating".
+  * Once strike temperature is reached: "Strike temperature reached: Add grain".
 * `2`: Mash step complete (prompt: "Sparge water alert").
 * `3`: Boil temperature reached (prompt: "Boil started / add bittering hops").
 * `4`: Boil addition alert (prompt: "Add hop / fining addition").

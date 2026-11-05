@@ -560,6 +560,37 @@ void test_g30_web_control_actions_mapping(void) {
     cmd.action = CMD_ACTION_ACK_INTERACTION;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("I                  ", buf);
+
+    // Press SET command
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_PRESS_SET;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("T                  ", buf);
+}
+
+void test_g30_parse_initial_strike_water_prompt(void) {
+    unified_boiler_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.target_temp_c = 67.0f;
+    state.current_temp_c = 23.0f;
+    state.heat_active = false;
+    state.stage.step_index = 1;
+
+    // Y notification received at session start: Y0,0,1,0,1,1,1,0
+    const uint8_t notif_data[] = "Y0,0,1,0,1,1,1,0";
+    g30_notification_type_t type = G30_NOTIF_UNKNOWN;
+
+    esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_TRUE(state.interaction.required);
+    TEST_ASSERT_EQUAL_UINT8(1, state.interaction.code);
+    TEST_ASSERT_EQUAL_STRING("Add mash water & Press SET to start heating", state.interaction.message);
+
+    // When temperature heats up to 67C:
+    const uint8_t temp_notif[] = "X67.0,67.0";
+    err = g30_parse_notification(temp_notif, strlen((char*)temp_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
 }
 
 // =============================================================================
@@ -606,6 +637,7 @@ int main(int argc, char **argv) {
     // G30 Web Controller & Recipe tests
     RUN_TEST(test_g30_web_recipe_conversion_and_encoding);
     RUN_TEST(test_g30_web_control_actions_mapping);
+    RUN_TEST(test_g30_parse_initial_strike_water_prompt);
 
     return UNITY_END();
 }

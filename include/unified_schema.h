@@ -26,7 +26,7 @@ typedef enum {
 // Unified Boiler State Schema (e.g. Grainfather G30)
 // =============================================================================
 #define MAX_STEP_NAME_LEN           24
-#define MAX_INTERACTION_MSG_LEN     48
+#define MAX_INTERACTION_MSG_LEN     64
 
 typedef struct {
     float    current_temp_c;
@@ -128,7 +128,8 @@ typedef enum {
     CMD_ACTION_ACK_INTERACTION  = 8,
     CMD_ACTION_DISMISS_ALERT    = 9,
     CMD_ACTION_LOAD_RECIPE      = 10,
-    CMD_ACTION_CANCEL_SESSION   = 11
+    CMD_ACTION_CANCEL_SESSION   = 11,
+    CMD_ACTION_PRESS_SET        = 12
 } command_action_t;
 
 typedef struct {
