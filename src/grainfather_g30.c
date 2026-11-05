@@ -41,20 +41,50 @@ static void g30_resolve_interaction_message(unified_boiler_state_t *state, uint8
     if (state == NULL) {
         return;
     }
+
+    // Check if G30 is in recipe auto mode and at the initial strike water fill step
+    bool is_strike_fill = (state->auto_mode && state->stage.step_index <= 1 &&
+                           !state->heat_active && !state->ramp_active &&
+                           state->target_temp_c > 0.0f &&
+                           state->current_temp_c < (state->target_temp_c - 2.0f));
+
+    if (is_strike_fill) {
+        state->interaction.required = true;
+        if (strncmp(state->interaction.message, "Add ", 4) != 0) {
+            strncpy(state->interaction.message, "Add mash water & Press SET to start heating",
+                    sizeof(state->interaction.message) - 1);
+            state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+        }
+        strncpy(state->stage.step_name, "Add Strike Water", sizeof(state->stage.step_name) - 1);
+        state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+        return;
+    }
+
+    // Populate stage step name for auto mode and manual mode
+    if (state->auto_mode) {
+        if (state->stage.step_index <= 1) {
+            if (state->ramp_active) {
+                strncpy(state->stage.step_name, "Heating Strike Water", sizeof(state->stage.step_name) - 1);
+            } else {
+                strncpy(state->stage.step_name, "Mash Step 1", sizeof(state->stage.step_name) - 1);
+            }
+        } else {
+            snprintf(state->stage.step_name, sizeof(state->stage.step_name), "Mash Step %u", state->stage.step_index);
+        }
+        state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+    } else {
+        strncpy(state->stage.step_name, "Manual Mode", sizeof(state->stage.step_name) - 1);
+        state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+    }
+
     if (!state->interaction.required) {
         strncpy(state->interaction.message, "Normal operation", sizeof(state->interaction.message) - 1);
         state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
         return;
     }
 
-    if (code == 1 && state->stage.step_index <= 1 && !state->heat_active &&
-        state->target_temp_c > 0.0f && state->current_temp_c < (state->target_temp_c - 2.0f)) {
-        strncpy(state->interaction.message, "Add mash water & Press SET to start heating",
-                sizeof(state->interaction.message) - 1);
-    } else {
-        strncpy(state->interaction.message, g30_get_interaction_message(code),
-                sizeof(state->interaction.message) - 1);
-    }
+    strncpy(state->interaction.message, g30_get_interaction_message(code),
+            sizeof(state->interaction.message) - 1);
     state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
 }
 // =============================================================================
@@ -269,9 +299,7 @@ esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
             if (sscanf(payload, "%f,%f", &target, &current) == 2) {
                 state->target_temp_c = target;
                 state->current_temp_c = current;
-                if (state->interaction.required) {
-                    g30_resolve_interaction_message(state, state->interaction.code);
-                }
+                g30_resolve_interaction_message(state, state->interaction.code);
             } else {
                 return ESP_ERR_INVALID_ARG;
             }

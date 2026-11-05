@@ -576,21 +576,27 @@ void test_g30_parse_initial_strike_water_prompt(void) {
     state.heat_active = false;
     state.stage.step_index = 1;
 
-    // Y notification received at session start: Y0,0,1,0,1,1,1,0
-    const uint8_t notif_data[] = "Y0,0,1,0,1,1,1,0";
+    // Y notification received at session start with inter_m=0, inter_c=0: Y0,0,1,0,0,0,1,0
+    const uint8_t notif_data[] = "Y0,0,1,0,0,0,1,0";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
     esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_TRUE(state.interaction.required);
-    TEST_ASSERT_EQUAL_UINT8(1, state.interaction.code);
     TEST_ASSERT_EQUAL_STRING("Add mash water & Press SET to start heating", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Add Strike Water", state.stage.step_name);
 
-    // When temperature heats up to 67C:
+    // When temperature heats up to 67C and G30 alarms to add grain (inter_m=1, inter_c=1):
     const uint8_t temp_notif[] = "X67.0,67.0";
     err = g30_parse_notification(temp_notif, strlen((char*)temp_notif), &state, &type);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+
+    const uint8_t strike_alert[] = "Y1,1,1,0,1,1,1,0";
+    err = g30_parse_notification(strike_alert, strlen((char*)strike_alert), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_TRUE(state.interaction.required);
     TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Mash Step 1", state.stage.step_name);
 }
 
 // =============================================================================

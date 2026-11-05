@@ -235,6 +235,29 @@ esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
         return ESP_ERR_NOT_FOUND;
     }
 
+    // Update local state immediately so web status reflects recipe start prompt
+    if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_g30_state.auto_mode = true;
+        s_g30_state.stage.step_index = 1;
+        s_g30_state.heat_active = false;
+        s_g30_state.ramp_active = false;
+        if (recipe->mash_step_count > 0) {
+            s_g30_state.target_temp_c = recipe->mash_steps[0].temp_c;
+        }
+        s_g30_state.interaction.required = true;
+        if (recipe->mash_water_l > 0.0f) {
+            snprintf(s_g30_state.interaction.message, sizeof(s_g30_state.interaction.message),
+                     "Add %.1fL water & Press SET to start heating", recipe->mash_water_l);
+        } else {
+            strncpy(s_g30_state.interaction.message, "Add mash water & Press SET to start heating",
+                    sizeof(s_g30_state.interaction.message) - 1);
+        }
+        s_g30_state.interaction.message[sizeof(s_g30_state.interaction.message) - 1] = '\0';
+        strncpy(s_g30_state.stage.step_name, "Add Strike Water", sizeof(s_g30_state.stage.step_name) - 1);
+        s_g30_state.stage.step_name[sizeof(s_g30_state.stage.step_name) - 1] = '\0';
+        xSemaphoreGive(s_g30_state_mutex);
+    }
+
     ble_outbound_cmd_packet_t outbound_pkt;
     memset(&outbound_pkt, 0, sizeof(outbound_pkt));
     memcpy(outbound_pkt.mac, target_mac, 6);
