@@ -40,6 +40,7 @@ static uint16_t          s_scan_count = 0;
 static bool              s_is_scanning = false;
 
 static SemaphoreHandle_t s_ble_mutex = NULL;
+static ble_peer_event_cb_t s_peer_cb = NULL;
 
 // Forward declarations
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
@@ -80,11 +81,28 @@ static void ble_cmd_worker_task(void *pvParameters) {
 
             if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 int peer_idx = -1;
-                if (target_handle != BLE_HS_CONN_HANDLE_NONE) {
+                if (target_handle != BLE_HS_CONN_HANDLE_NONE && target_handle != 0) {
                     peer_idx = find_peer_by_handle(target_handle);
-                } else if (s_peers[0].connected) {
-                    peer_idx = 0;
-                    target_handle = s_peers[0].conn_handle;
+                } else {
+                    bool has_mac = false;
+                    for (int i = 0; i < 6; i++) {
+                        if (cmd_pkt.mac[i] != 0) {
+                            has_mac = true;
+                            break;
+                        }
+                    }
+                    if (has_mac) {
+                        for (int i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+                            if (s_peers[i].connected && memcmp(s_peers[i].addr, cmd_pkt.mac, 6) == 0) {
+                                peer_idx = i;
+                                target_handle = s_peers[i].conn_handle;
+                                break;
+                            }
+                        }
+                    } else if (s_peers[0].connected) {
+                        peer_idx = 0;
+                        target_handle = s_peers[0].conn_handle;
+                    }
                 }
 
                 if (peer_idx >= 0 && s_peers[peer_idx].connected) {
@@ -103,7 +121,7 @@ static void ble_cmd_worker_task(void *pvParameters) {
                     ESP_LOGE(TAG, "ble_gattc_write_flat failed: rc=%d", rc);
                 }
             } else {
-                ESP_LOGW(TAG, "Cannot dispatch command; no active BLE connection handle");
+                ESP_LOGW(TAG, "Cannot dispatch command; no active BLE connection handle or matching peer");
             }
 
             uint16_t delay_ms = cmd_pkt.delay_after_ms > 0 ? cmd_pkt.delay_after_ms : G30_WRITE_PACING_MS;
@@ -146,6 +164,9 @@ static int ble_on_notify(uint16_t conn_handle, const struct ble_gatt_error *erro
 static int ble_on_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *error,
                            const struct ble_gatt_chr *chr, void *arg) {
     if (error->status == 0 && chr != NULL) {
+        ble_peer_device_t peer_copy;
+        bool newly_discovered = false;
+
         if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             int peer_idx = find_peer_by_handle(conn_handle);
             if (peer_idx >= 0) {
@@ -161,8 +182,20 @@ static int ble_on_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *er
                     s_peers[peer_idx].write_val_handle = chr->val_handle;
                     ESP_LOGI(TAG, "Resolved G30 Write characteristic handle: 0x%04X", chr->val_handle);
                 }
+
+                if (s_peers[peer_idx].notify_val_handle != 0 &&
+                    s_peers[peer_idx].write_val_handle != 0 &&
+                    !s_peers[peer_idx].services_discovered) {
+                    s_peers[peer_idx].services_discovered = true;
+                    peer_copy = s_peers[peer_idx];
+                    newly_discovered = true;
+                }
             }
             xSemaphoreGive(s_ble_mutex);
+        }
+
+        if (newly_discovered && s_peer_cb != NULL) {
+            s_peer_cb(&peer_copy, true);
         }
     }
     return 0;
@@ -297,13 +330,22 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
             ESP_LOGW(TAG, "BLE disconnected! conn_handle=%d (reason=%d)",
                      event->disconnect.conn.conn_handle, event->disconnect.reason);
 
+            ble_peer_device_t disc_peer;
+            bool had_peer = false;
+
             if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
                 int slot = find_peer_by_handle(event->disconnect.conn.conn_handle);
                 if (slot >= 0) {
+                    disc_peer = s_peers[slot];
+                    had_peer = true;
                     memset(&s_peers[slot], 0, sizeof(ble_peer_device_t));
                     s_peers[slot].conn_handle = BLE_HS_CONN_HANDLE_NONE;
                 }
                 xSemaphoreGive(s_ble_mutex);
+            }
+
+            if (had_peer && s_peer_cb != NULL) {
+                s_peer_cb(&disc_peer, false);
             }
             return 0;
         }
@@ -361,6 +403,11 @@ esp_err_t ble_manager_init(QueueHandle_t telemetry_queue, QueueHandle_t cmd_queu
     ble_hs_cfg.sync_cb = ble_on_sync;
 
     nimble_port_freertos_init(ble_host_task);
+    return ESP_OK;
+}
+
+esp_err_t ble_manager_register_peer_cb(ble_peer_event_cb_t cb) {
+    s_peer_cb = cb;
     return ESP_OK;
 }
 

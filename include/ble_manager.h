@@ -20,12 +20,26 @@ extern "C" {
 #define BLE_SCAN_MAX_RESULTS        16
 
 /**
+ * @brief Callback for peer device lifecycle events (connect / disconnect)
+ * @param peer Pointer to peer device information
+ * @param connected True if connected, false if disconnected
+ */
+typedef void (*ble_peer_event_cb_t)(const ble_peer_device_t *peer, bool connected);
+
+/**
  * @brief Initialize NimBLE Central host and register queues
  * @param telemetry_queue Queue for inbound telemetry packets
  * @param cmd_queue Queue for outbound commands
  * @return ESP_OK on success, or ESP error code.
  */
 esp_err_t ble_manager_init(QueueHandle_t telemetry_queue, QueueHandle_t cmd_queue);
+
+/**
+ * @brief Register callback for peer connection/disconnection lifecycle events
+ * @param cb Callback function
+ * @return ESP_OK on success
+ */
+esp_err_t ble_manager_register_peer_cb(ble_peer_event_cb_t cb);
 
 /**
  * @brief Start active BLE discovery scan
@@ -36,6 +50,7 @@ esp_err_t ble_manager_start_scan(uint32_t duration_sec);
 
 /**
  * @brief Stop active BLE scan
+ * @param duration_sec Scan duration in seconds (0 for continuous default)
  * @return ESP_OK on success, or ESP error code.
  */
 esp_err_t ble_manager_stop_scan(void);
