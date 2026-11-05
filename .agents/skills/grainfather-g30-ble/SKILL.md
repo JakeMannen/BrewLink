@@ -75,47 +75,59 @@ Transferring an automated brew recipe from the Gateway / Dashboard to the G30 re
 ```mermaid
 sequenceDiagram
     autonumber
-    participant D as Dashboard / WiFi (MQTT)
+    participant D as Dashboard / WiFi (MQTT / Web)
     participant C1 as Gateway Core 1 (Relay & Parser)
     participant C0 as Gateway Core 0 (NimBLE Client)
     participant G30 as Grainfather G30 Controller
 
-    D->>C1: MQTT: brewlink/device/{mac}/cmd (load_recipe JSON)
+    D->>C1: Web / MQTT: Recipe transfer payload
     C1->>C1: Validate recipe & decompose into 19-char G30 packets
     
-    C1->>C0: Push Header Packet ("R75,2,16.5,14.0,  ") via s_ble_cmd_queue
-    C0->>G30: GATT Write: Header (Boil: 75m, Steps: 2, Mash: 16.5L, Sparge: 14.0L)
+    C1->>C0: Line 1: Header Packet ("R60,2,14.4,9.8,    ")
+    C0->>G30: GATT Write: Header (Boil: 60m, Steps: 2, Mash: 14.4L, Sparge: 9.8L)
+    Note over C0,G30: Delay 150ms
+
+    C1->>C0: Line 2: Flags ("0,1,1,0,0,         ")
+    C0->>G30: GATT Write: Config Flags (water_treat=0, sparge_cnt=1, sparge_alert=1)
+    Note over C0,G30: Delay 150ms
+
+    C1->>C0: Line 3: Name ("NEWCASTLE BROWN ALE")
+    C0->>G30: GATT Write: Recipe Name Display
+    Note over C0,G30: Delay 150ms
+
+    C1->>C0: Line 4: Boil Params ("0,2,0,0,           ")
+    C0->>G30: GATT Write: Boil Params (hop_stand=0, boil_additions=2, boil_pwr=0)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Boil Stop 1 ("60                 ")
-    C0->>G30: GATT Write: Boil Addition Stop 1 (60 mins remaining)
+    C1->>C0: Line 5: Boil Stop 1 ("60,                ")
+    C0->>G30: GATT Write: Boil Addition 1 (60 mins remaining)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Boil Stop 2 ("15                 ")
-    C0->>G30: GATT Write: Boil Addition Stop 2 (15 mins remaining)
+    C1->>C0: Line 6: Boil Stop 2 ("20,                ")
+    C0->>G30: GATT Write: Boil Addition 2 (20 mins remaining)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Mash Step 1 ("65:60              ")
-    C0->>G30: GATT Write: Mash Step 1 (65°C for 60 minutes)
+    C1->>C0: Line 7: Mash Step 1 ("67:60              ")
+    C0->>G30: GATT Write: Mash Step 1 (67°C for 60 minutes)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Mash Step 2 ("75:10              ")
-    C0->>G30: GATT Write: Mash Step 2 (75°C for 10 minutes)
+    C1->>C0: Line 8: Mash Step 2 ("76:15              ")
+    C0->>G30: GATT Write: Mash Step 2 (76°C for 15 minutes)
     Note over C0,G30: Delay 150ms
 
     G30-->>C0: GATT Notification: "Y..." (Auto Mode Active)
     C0->>C1: Push Telemetry Packet
-    C1->>D: MQTT: brewlink/device/{mac}/telemetry (Recipe Active)
+    C1->>D: Telemetry / Status Update (Recipe Active)
 ```
 
-### 3.2. Recipe Header Syntax
-The recipe header initiates recipe programming:
-```text
-R{boil_time_min},{mash_step_count},{mash_water_l},{sparge_water_l},
-```
-* Example: `R75,2,16.5,14.0,` -> Padded with spaces to 19 chars: `"R75,2,16.5,14.0,  "`
-* Followed by boil stop times in descending order (e.g. `"60                 "`, `"15                 "`).
-* Followed by mash steps in `{temperature_c}:{duration_min}` format (e.g. `"65:60              "`).
+### 3.2. Complete Recipe Transmission Sequence
+The G30 Connect controller expects multi-line recipe parameters in strict sequence:
+1. **Line 1 (Main Header)**: `R{boil_time_min},{mash_step_count},{mash_water_l},{sparge_water_l},` (e.g. `"R60,2,14.4,9.8,    "`)
+2. **Line 2 (Configuration Flags)**: `"0,1,1,0,0,         "` (water treatment alert=0, sparge counter=1, sparge alert=1, delayed=0, skip start=0)
+3. **Line 3 (Recipe Name)**: Uppercase alphanumeric name, truncated to 19 characters, space padded (e.g. `"NEWCASTLE BROWN ALE"`)
+4. **Line 4 (Boil Parameters)**: `"{hop_stand_min},{boil_addition_count},0,0,"` (e.g. `"0,2,0,0,           "`)
+5. **Lines 5..4+N (Boil Addition Stops)**: Time remaining in minutes with trailing comma in descending order (e.g. `"60,                "`, `"20,                "`)
+6. **Lines 4+N+1.. (Mash Steps)**: Mash temperature and duration in `{temp_c}:{duration_min}` format (e.g. `"67:60              "`, `"76:15              "`)
 
 ---
 

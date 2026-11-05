@@ -123,13 +123,14 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
 // =============================================================================
 // Recipe Command Encoders
 // =============================================================================
+
+// Line 1: Main Header: R{boil_min},{step_count},{mash_water},{sparge_water},
 esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]) {
     if (recipe == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
     char raw_cmd[G30_COMMAND_LEN + 1];
-    // Layout: R{boil_min},{step_count},{mash_water},{sparge_water},
     snprintf(raw_cmd, sizeof(raw_cmd), "R%u,%u,%.1f,%.1f,",
              recipe->boil_time_min,
              recipe->mash_step_count,
@@ -139,6 +140,70 @@ esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[
     return g30_format_padded_cmd(raw_cmd, out_buf);
 }
 
+// Line 2: Recipe Flags: 0,1,1,0,0,
+// (water_treat=0, sparge_counter=1, sparge_alert=1, delayed=0, skip_start=0)
+esp_err_t g30_encode_recipe_flags(char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return g30_format_padded_cmd("0,1,1,0,0,", out_buf);
+}
+
+// Line 3: Recipe Name (sanitized uppercase ASCII, truncated to 19 characters, space padded)
+esp_err_t g30_encode_recipe_name(const char *name, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char clean_name[G30_COMMAND_LEN + 1];
+    memset(clean_name, 0, sizeof(clean_name));
+
+    if (name != NULL && name[0] != '\0') {
+        int dst_idx = 0;
+        for (int i = 0; dst_idx < G30_COMMAND_LEN && name[i] != '\0'; i++) {
+            char c = name[i];
+            if (c >= 'a' && c <= 'z') {
+                c = (char)(c - 'a' + 'A');
+            }
+            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_') {
+                clean_name[dst_idx++] = c;
+            }
+        }
+        clean_name[dst_idx] = '\0';
+    }
+
+    if (clean_name[0] == '\0') {
+        strncpy(clean_name, "BREW RECIPE", sizeof(clean_name) - 1);
+    }
+
+    return g30_format_padded_cmd(clean_name, out_buf);
+}
+
+// Line 4: Boil Parameters: {hop_stand_min},{boil_addition_count},0,0,
+esp_err_t g30_encode_recipe_boil_params(uint16_t hop_stand_min, uint8_t boil_addition_count, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    snprintf(raw_cmd, sizeof(raw_cmd), "%u,%u,0,0,", hop_stand_min, boil_addition_count);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+// Line 5..: Boil Addition Stop: {time_remaining_min},
+esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    snprintf(raw_cmd, sizeof(raw_cmd), "%u,", boil_time_remaining_min);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+// Mash Step: {temp_c}:{duration_min}
 esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]) {
     if (step == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -149,17 +214,6 @@ esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_
     snprintf(raw_cmd, sizeof(raw_cmd), "%u:%u",
              (unsigned int)step->temp_c,
              step->duration_min);
-
-    return g30_format_padded_cmd(raw_cmd, out_buf);
-}
-
-esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]) {
-    if (out_buf == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char raw_cmd[G30_COMMAND_LEN + 1];
-    snprintf(raw_cmd, sizeof(raw_cmd), "%u", boil_time_remaining_min);
 
     return g30_format_padded_cmd(raw_cmd, out_buf);
 }

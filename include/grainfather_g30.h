@@ -91,12 +91,45 @@ esp_err_t g30_format_padded_cmd(const char *cmd_str, char out_buf[G30_COMMAND_LE
 esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMMAND_LEN + 1]);
 
 /**
- * @brief Encode the recipe header command: R{boil_min},{steps},{mash_water},{sparge_water},
+ * @brief Encode the recipe header command (Line 1): R{boil_min},{steps},{mash_water},{sparge_water},
  * @param recipe Pointer to recipe structure
  * @param out_buf Buffer of at least 20 bytes
  * @return ESP_OK on success
  */
 esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]);
+
+/**
+ * @brief Encode recipe configuration flags (Line 2): 0,1,1,0,0,
+ * @details Flags: water_treat=0, sparge_counter=1, sparge_alert=1, delayed=0, skip_start=0
+ * @param out_buf Buffer of at least 20 bytes
+ * @return ESP_OK on success
+ */
+esp_err_t g30_encode_recipe_flags(char out_buf[G30_COMMAND_LEN + 1]);
+
+/**
+ * @brief Encode sanitized recipe name command (Line 3): 19-char uppercase ASCII space padded
+ * @param name Recipe name string
+ * @param out_buf Buffer of at least 20 bytes
+ * @return ESP_OK on success
+ */
+esp_err_t g30_encode_recipe_name(const char *name, char out_buf[G30_COMMAND_LEN + 1]);
+
+/**
+ * @brief Encode boil parameters command (Line 4): {hop_stand_min},{boil_addition_count},0,0,
+ * @param hop_stand_min Post-boil hop stand / whirlpool duration in minutes
+ * @param boil_addition_count Number of unique boil additions to follow
+ * @param out_buf Buffer of at least 20 bytes
+ * @return ESP_OK on success
+ */
+esp_err_t g30_encode_recipe_boil_params(uint16_t hop_stand_min, uint8_t boil_addition_count, char out_buf[G30_COMMAND_LEN + 1]);
+
+/**
+ * @brief Encode a boil stop command (Line 5..): {time_left_min},
+ * @param boil_time_remaining_min Boil time remaining in minutes
+ * @param out_buf Buffer of at least 20 bytes
+ * @return ESP_OK on success
+ */
+esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]);
 
 /**
  * @brief Encode a mash step command: {temp_c}:{duration_min}
@@ -105,14 +138,6 @@ esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[
  * @return ESP_OK on success
  */
 esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]);
-
-/**
- * @brief Encode a boil stop command: {time_left_min}
- * @param boil_time_remaining_min Boil time remaining in minutes
- * @param out_buf Buffer of at least 20 bytes
- * @return ESP_OK on success
- */
-esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]);
 
 /**
  * @brief Get a user-friendly description for a G30 interaction code

@@ -242,7 +242,7 @@ esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
     outbound_pkt.len = G30_COMMAND_LEN;
     outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
 
-    // 1. Enqueue recipe header
+    // Line 1: Main Recipe Header (R{boil_min},{mash_steps},{mash_water},{sparge_water},)
     esp_err_t err = g30_encode_recipe_header(recipe, outbound_pkt.cmd_bytes);
     if (err != ESP_OK) {
         return err;
@@ -251,9 +251,36 @@ esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
         return ESP_ERR_NO_MEM;
     }
 
-    // 2. Enqueue mash steps
-    for (int i = 0; i < recipe->mash_step_count; i++) {
-        err = g30_encode_recipe_mash_step(&recipe->mash_steps[i], outbound_pkt.cmd_bytes);
+    // Line 2: Recipe Configuration Flags (0,1,1,0,0,)
+    err = g30_encode_recipe_flags(outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 3: Recipe Name (sanitized uppercase ASCII, space padded)
+    err = g30_encode_recipe_name(recipe->name, outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 4: Boil Parameters ({hop_stand_min},{boil_addition_count},0,0,)
+    err = g30_encode_recipe_boil_params(0, recipe->boil_addition_count, outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 5..4+N: Boil Stops in descending order ({time_left_min},)
+    for (int i = 0; i < recipe->boil_addition_count; i++) {
+        err = g30_encode_recipe_boil_stop(recipe->boil_additions_min[i], outbound_pkt.cmd_bytes);
         if (err != ESP_OK) {
             return err;
         }
@@ -262,9 +289,9 @@ esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
         }
     }
 
-    // 3. Enqueue boil stops
-    for (int i = 0; i < recipe->boil_addition_count; i++) {
-        err = g30_encode_recipe_boil_stop(recipe->boil_additions_min[i], outbound_pkt.cmd_bytes);
+    // Line 4+N+1..: Mash Steps in sequence ({temp_c}:{duration_min})
+    for (int i = 0; i < recipe->mash_step_count; i++) {
+        err = g30_encode_recipe_mash_step(&recipe->mash_steps[i], outbound_pkt.cmd_bytes);
         if (err != ESP_OK) {
             return err;
         }

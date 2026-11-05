@@ -285,21 +285,36 @@ void test_g30_encode_recipe_commands(void) {
     recipe.mash_water_l = 16.5f;
     recipe.sparge_water_l = 14.0f;
 
-    // Header -> "R75,2,16.5,14.0,  " (19 bytes)
+    // Line 1: Header -> "R75,2,16.5,14.0,   " (19 bytes)
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_header(&recipe, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("R75,2,16.5,14.0,  ", buf);
+    TEST_ASSERT_EQUAL_STRING("R75,2,16.5,14.0,   ", buf);
+
+    // Line 2: Recipe Flags -> "0,1,1,0,0,         "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_flags(buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("0,1,1,0,0,         ", buf);
+
+    // Line 3: Recipe Name -> "SAISON             "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_name("Saison", buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("SAISON             ", buf);
+
+    // Line 4: Boil Params -> "0,2,0,0,           "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_params(0, 2, buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("0,2,0,0,           ", buf);
+
+    // Line 5: Boil stop at 15 min remaining -> "15,                "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(15, buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("15,                ", buf);
 
     // Mash Step 1: 65C for 60 min -> "65:60              "
     unified_mash_step_t step1 = {.temp_c = 65.0f, .duration_min = 60};
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&step1, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
     TEST_ASSERT_EQUAL_STRING("65:60              ", buf);
-
-    // Boil stop at 15 min remaining -> "15                 "
-    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(15, buf));
-    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("15                 ", buf);
 }
 
 // =============================================================================
@@ -456,39 +471,51 @@ void test_compatibility_full_advertisement_check(void) {
 void test_g30_web_recipe_conversion_and_encoding(void) {
     unified_recipe_t recipe;
     memset(&recipe, 0, sizeof(recipe));
-    strncpy(recipe.name, "Grainfather Pale Ale", sizeof(recipe.name) - 1);
+    strncpy(recipe.name, "Newcastle Brown Ale", sizeof(recipe.name) - 1);
     recipe.boil_time_min = 60;
-    recipe.mash_water_l = 16.5f;
-    recipe.sparge_water_l = 14.0f;
+    recipe.mash_water_l = 14.4f;
+    recipe.sparge_water_l = 9.8f;
     recipe.mash_step_count = 2;
-    recipe.mash_steps[0].temp_c = 65.0f;
+    recipe.mash_steps[0].temp_c = 67.0f;
     recipe.mash_steps[0].duration_min = 60;
-    recipe.mash_steps[1].temp_c = 75.0f;
-    recipe.mash_steps[1].duration_min = 10;
+    recipe.mash_steps[1].temp_c = 76.0f;
+    recipe.mash_steps[1].duration_min = 15;
     recipe.boil_addition_count = 2;
     recipe.boil_additions_min[0] = 60;
-    recipe.boil_additions_min[1] = 15;
+    recipe.boil_additions_min[1] = 20;
 
     char header[G30_COMMAND_LEN + 1];
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_header(&recipe, header));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(header));
-    TEST_ASSERT_EQUAL_STRING("R60,2,16.5,14.0,  ", header);
+    TEST_ASSERT_EQUAL_STRING("R60,2,14.4,9.8,    ", header);
 
-    char step1[G30_COMMAND_LEN + 1];
-    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[0], step1));
-    TEST_ASSERT_EQUAL_STRING("65:60              ", step1);
+    char flags[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_flags(flags));
+    TEST_ASSERT_EQUAL_STRING("0,1,1,0,0,         ", flags);
 
-    char step2[G30_COMMAND_LEN + 1];
-    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[1], step2));
-    TEST_ASSERT_EQUAL_STRING("75:10              ", step2);
+    char name[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_name(recipe.name, name));
+    TEST_ASSERT_EQUAL_STRING("NEWCASTLE BROWN ALE", name);
+
+    char boil_params[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_params(0, recipe.boil_addition_count, boil_params));
+    TEST_ASSERT_EQUAL_STRING("0,2,0,0,           ", boil_params);
 
     char boil1[G30_COMMAND_LEN + 1];
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(recipe.boil_additions_min[0], boil1));
-    TEST_ASSERT_EQUAL_STRING("60                 ", boil1);
+    TEST_ASSERT_EQUAL_STRING("60,                ", boil1);
 
     char boil2[G30_COMMAND_LEN + 1];
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(recipe.boil_additions_min[1], boil2));
-    TEST_ASSERT_EQUAL_STRING("15                 ", boil2);
+    TEST_ASSERT_EQUAL_STRING("20,                ", boil2);
+
+    char step1[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[0], step1));
+    TEST_ASSERT_EQUAL_STRING("67:60              ", step1);
+
+    char step2[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[1], step2));
+    TEST_ASSERT_EQUAL_STRING("76:15              ", step2);
 }
 
 void test_g30_web_control_actions_mapping(void) {
