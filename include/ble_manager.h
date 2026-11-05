@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "config.h"
+#include "ble_compatibility.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,7 +57,7 @@ esp_err_t ble_manager_start_scan(uint32_t duration_sec);
 esp_err_t ble_manager_stop_scan(void);
 
 /**
- * @brief Get copy of discovered BLE advertising devices from recent scan
+ * @brief Get copy of discovered compatible BLE peripherals from recent scan
  * @param[out] out_entries Buffer for scan entries
  * @param[in] max_entries Maximum entries to copy
  * @param[out] count Actual count copied
@@ -65,10 +66,18 @@ esp_err_t ble_manager_stop_scan(void);
 esp_err_t ble_manager_get_scan_results(ble_scan_entry_t *out_entries, uint16_t max_entries, uint16_t *count);
 
 /**
+ * @brief Check if a discovered peripheral MAC address belongs to a compatible device defined in sourcecode
+ * @param addr 6-byte target MAC address
+ * @return true if device is verified compatible, false otherwise
+ */
+bool ble_manager_is_addr_compatible(const uint8_t *addr);
+
+/**
  * @brief Initiate connection to a target peripheral by address
+ * @note Only peripherals defined as compatible in sourcecode are connectable.
  * @param addr 6-byte target MAC address
  * @param addr_type Address type (0 = Public, 1 = Random)
- * @return ESP_OK on success, or ESP error code.
+ * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if device is not compatible, or ESP error code.
  */
 esp_err_t ble_manager_connect(const uint8_t *addr, uint8_t addr_type);
 

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS 
         "main.c"
         "grainfather_g30.c"
+        "ble_compatibility.c"
         "config_store.c"
         "wifi_manager.c"
         "mqtt_manager.c"

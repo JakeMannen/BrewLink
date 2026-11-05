@@ -310,6 +310,8 @@ static esp_err_t api_ble_scan_get_handler(httpd_req_t *req) {
         cJSON_AddStringToObject(item, "name", entries[i].name);
         cJSON_AddNumberToObject(item, "rssi", entries[i].rssi);
         cJSON_AddBoolToObject(item, "is_grainfather", entries[i].is_grainfather);
+        cJSON_AddBoolToObject(item, "is_compatible", entries[i].is_compatible);
+        cJSON_AddStringToObject(item, "model", entries[i].model);
         cJSON_AddStringToObject(item, "equipment_type", equipment_type_to_str(entries[i].equipment_type));
         cJSON_AddBoolToObject(item, "is_connected", entries[i].is_connected);
 
@@ -364,11 +366,19 @@ static esp_err_t api_ble_connect_post_handler(httpd_req_t *req) {
     }
 
     uint8_t addr_type = (type_item && cJSON_IsNumber(type_item)) ? (uint8_t)type_item->valueint : 0;
-    ble_manager_connect(mac, addr_type);
+    esp_err_t err = ble_manager_connect(mac, addr_type);
     cJSON_Delete(root);
 
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Device is not a compatible equipment device defined in sourcecode");
+        return ESP_FAIL;
+    } else if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to initiate BLE connection");
+        return ESP_FAIL;
+    }
+
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, "{\"status\":\"connecting\",\"message\":\"BLE connection initiated\"}", HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, "{\"status\":\"connecting\",\"message\":\"BLE connection initiated to compatible device\"}", HTTPD_RESP_USE_STRLEN);
 }
 
 // POST /api/ble/disconnect - Disconnect BLE device
