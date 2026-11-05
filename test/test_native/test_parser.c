@@ -581,6 +581,18 @@ void test_g30_web_control_actions_mapping(void) {
     cmd.action = CMD_ACTION_PRESS_SET;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("T                  ", buf);
+
+    // Pause/Resume timer command
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_PAUSE_TIMER;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("G                  ", buf);
+
+    // Cancel timer command
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_CANCEL_TIMER;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("C                  ", buf);
 }
 
 void test_g30_parse_initial_strike_water_prompt(void) {
@@ -611,7 +623,97 @@ void test_g30_parse_initial_strike_water_prompt(void) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_TRUE(state.interaction.required);
     TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Add Grain", state.stage.step_name);
+}
+
+void test_g30_stage_name_mapping(void) {
+    unified_boiler_state_t state;
+    memset(&state, 0, sizeof(state));
+    g30_notification_type_t type = G30_NOTIF_UNKNOWN;
+
+    // Stage 0 -> Idle
+    const uint8_t idle_notif[] = "Y0,0,1,0,0,0,0,0";
+    esp_err_t err = g30_parse_notification(idle_notif, strlen((char*)idle_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Idle", state.stage.step_name);
+
+    // Stage 1 with cold water and no heat -> Add Strike Water
+    state.target_temp_c = 67.0f;
+    state.current_temp_c = 20.0f;
+    const uint8_t strike_water_notif[] = "Y0,0,1,0,0,0,1,0";
+    err = g30_parse_notification(strike_water_notif, strlen((char*)strike_water_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Add Strike Water", state.stage.step_name);
+
+    // Stage 1 with heat or ramp active -> Heating Strike Water
+    const uint8_t heat_strike_notif[] = "Y1,0,1,1,0,0,1,0";
+    err = g30_parse_notification(heat_strike_notif, strlen((char*)heat_strike_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Heating Strike Water", state.stage.step_name);
+
+    // Stage 2 -> Add Grain
+    const uint8_t add_grain_notif[] = "Y1,0,1,0,0,0,2,0";
+    err = g30_parse_notification(add_grain_notif, strlen((char*)add_grain_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Add Grain", state.stage.step_name);
+
+    // Stage 3 -> Mash Step 1 (stage 3 - 2 = 1)
+    state.target_temp_c = 65.0f;
+    state.current_temp_c = 65.0f;
+    const uint8_t mash1_notif[] = "Y1,1,1,0,0,0,3,0";
+    err = g30_parse_notification(mash1_notif, strlen((char*)mash1_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_STRING("Mash Step 1", state.stage.step_name);
+
+    // Stage 4 -> Mash Step 2 (stage 4 - 2 = 2)
+    state.target_temp_c = 72.0f;
+    state.current_temp_c = 72.0f;
+    const uint8_t mash2_notif[] = "Y1,1,1,0,0,0,4,0";
+    err = g30_parse_notification(mash2_notif, strlen((char*)mash2_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash Step 2", state.stage.step_name);
+
+    // Stage 5 with mash temp -> Mash Step 3 (stage 5 - 2 = 3)
+    state.target_temp_c = 78.0f;
+    state.current_temp_c = 78.0f;
+    const uint8_t mash3_notif[] = "Y1,1,1,0,0,0,5,0";
+    err = g30_parse_notification(mash3_notif, strlen((char*)mash3_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash Step 3", state.stage.step_name);
+
+    // Sparge Alert (inter_c = 2) -> Sparge
+    const uint8_t sparge_notif[] = "Y0,0,1,0,1,2,5,0";
+    err = g30_parse_notification(sparge_notif, strlen((char*)sparge_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Sparge", state.stage.step_name);
+
+    // Boil heating / ramp (target 100C, ramp active) -> Heating to Boil
+    state.target_temp_c = 100.0f;
+    state.current_temp_c = 85.0f;
+    state.boil_temp_c = 100.0f;
+    const uint8_t boil_ramp_notif[] = "Y1,0,1,1,0,0,6,0";
+    err = g30_parse_notification(boil_ramp_notif, strlen((char*)boil_ramp_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Heating to Boil", state.stage.step_name);
+
+    // Boil active (target 100C, ramp inactive) -> Boiling
+    state.current_temp_c = 100.0f;
+    const uint8_t boil_active_notif[] = "Y1,0,1,0,0,0,6,0";
+    err = g30_parse_notification(boil_active_notif, strlen((char*)boil_active_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Boiling", state.stage.step_name);
+
+    // Cooling alert (inter_c = 5) -> Cooling
+    const uint8_t cooling_notif[] = "Y0,0,1,0,1,5,7,0";
+    err = g30_parse_notification(cooling_notif, strlen((char*)cooling_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Cooling", state.stage.step_name);
+
+    // Manual mode -> Manual Mode
+    const uint8_t manual_notif[] = "Y1,1,0,0,0,0,0,0";
+    err = g30_parse_notification(manual_notif, strlen((char*)manual_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Manual Mode", state.stage.step_name);
 }
 
 // =============================================================================
@@ -659,6 +761,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_g30_web_recipe_conversion_and_encoding);
     RUN_TEST(test_g30_web_control_actions_mapping);
     RUN_TEST(test_g30_parse_initial_strike_water_prompt);
+    RUN_TEST(test_g30_stage_name_mapping);
 
     return UNITY_END();
 }

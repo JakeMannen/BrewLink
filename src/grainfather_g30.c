@@ -70,7 +70,7 @@ static void g30_resolve_interaction_message(unified_boiler_state_t *state, uint8
             strncpy(state->interaction.message, "Strike temperature reached: Add grain",
                     sizeof(state->interaction.message) - 1);
             state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
-            strncpy(state->stage.step_name, "Mash Step 1", sizeof(state->stage.step_name) - 1);
+            strncpy(state->stage.step_name, "Add Grain", sizeof(state->stage.step_name) - 1);
             state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
             return;
         }
@@ -78,14 +78,31 @@ static void g30_resolve_interaction_message(unified_boiler_state_t *state, uint8
 
     // Populate stage step name for other steps
     if (state->auto_mode) {
-        if (state->stage.step_index <= 1) {
+        if (state->stage.step_index == 0) {
+            strncpy(state->stage.step_name, "Idle", sizeof(state->stage.step_name) - 1);
+        } else if (state->stage.step_index == 1) {
             if (state->ramp_active || state->heat_active) {
                 strncpy(state->stage.step_name, "Heating Strike Water", sizeof(state->stage.step_name) - 1);
             } else {
-                strncpy(state->stage.step_name, "Mash Step 1", sizeof(state->stage.step_name) - 1);
+                strncpy(state->stage.step_name, "Add Strike Water", sizeof(state->stage.step_name) - 1);
+            }
+        } else if (state->stage.step_index == 2) {
+            strncpy(state->stage.step_name, "Add Grain", sizeof(state->stage.step_name) - 1);
+        } else if (code == 2) {
+            strncpy(state->stage.step_name, "Sparge", sizeof(state->stage.step_name) - 1);
+        } else if (code == 5) {
+            strncpy(state->stage.step_name, "Cooling", sizeof(state->stage.step_name) - 1);
+        } else if ((state->boil_temp_c > 0.0f && state->target_temp_c >= (state->boil_temp_c - 1.5f)) ||
+                   (state->target_temp_c >= 98.0f)) {
+            if (state->ramp_active) {
+                strncpy(state->stage.step_name, "Heating to Boil", sizeof(state->stage.step_name) - 1);
+            } else {
+                strncpy(state->stage.step_name, "Boiling", sizeof(state->stage.step_name) - 1);
             }
         } else {
-            snprintf(state->stage.step_name, sizeof(state->stage.step_name), "Mash Step %u", state->stage.step_index);
+            // In G30 auto recipe mode, stages 3+ correspond to mash steps (stage 3 = step 1, stage 4 = step 2, etc.)
+            uint8_t mash_step = (state->stage.step_index >= 2) ? (state->stage.step_index - 2) : 1;
+            snprintf(state->stage.step_name, sizeof(state->stage.step_name), "Mash Step %u", mash_step);
         }
         state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
     } else {

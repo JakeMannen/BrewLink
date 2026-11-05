@@ -556,6 +556,21 @@ static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
     } else if (strcmp(action_str, "cancel_session") == 0) {
         cmd.action = CMD_ACTION_CANCEL_SESSION;
         valid = true;
+    } else if (strcmp(action_str, "toggle_timer") == 0 ||
+               strcmp(action_str, "pause_timer") == 0 ||
+               strcmp(action_str, "resume_timer") == 0) {
+        cmd.action = CMD_ACTION_PAUSE_TIMER;
+        valid = true;
+    } else if (strcmp(action_str, "cancel_timer") == 0) {
+        cmd.action = CMD_ACTION_CANCEL_TIMER;
+        valid = true;
+    } else if (strcmp(action_str, "set_timer") == 0) {
+        cmd.action = CMD_ACTION_SET_TIMER;
+        cJSON *dur = cJSON_GetObjectItem(root, "duration_min");
+        if (dur && cJSON_IsNumber(dur) && dur->valueint > 0) {
+            cmd.params.timer_duration_min = (uint16_t)dur->valueint;
+            valid = true;
+        }
     }
 
     cJSON_Delete(root);
