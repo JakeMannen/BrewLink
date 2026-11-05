@@ -6,29 +6,6 @@
 #include "ble_compatibility.h"
 #include <string.h>
 
-#ifdef ESP_PLATFORM
-static const char *TAG = "BLE_COMPAT";
-#endif
-
-// Little-endian 128-bit service and characteristic UUIDs for Grainfather G30
-// 0000cdd0-0000-1000-8000-00805f9b34fb
-static const uint8_t s_g30_svc_uuid128[BLE_UUID128_LEN] = {
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xd0, 0xcd, 0x00, 0x00
-};
-
-// 0003cdd1-0000-1000-8000-00805f9b0131
-static const uint8_t s_g30_notify_uuid128[BLE_UUID128_LEN] = {
-    0x31, 0x01, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xd1, 0xcd, 0x03, 0x00
-};
-
-// 0003cdd2-0000-1000-8000-00805f9b0131
-static const uint8_t s_g30_write_uuid128[BLE_UUID128_LEN] = {
-    0x31, 0x01, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xd2, 0xcd, 0x03, 0x00
-};
-
 /**
  * @brief Authoritative registry of compatible Bluetooth devices defined in sourcecode
  * @note Only devices in this table can be discovered as connectable or connected to by BrewLink.
