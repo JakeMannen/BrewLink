@@ -150,12 +150,38 @@ The G30 Controller pushes ASCII notification strings on characteristic `0003cdd1
 ### 4.2. Interaction Codes
 * `0`: Normal operation / Idle.
 * `1`: Mash prompt:
-  * Prior to heating (`heat_active == 0` and `current_temp < target_temp`): "Add mash water & Press SET to start heating".
-  * Once strike temperature is reached: "Strike temperature reached: Add grain".
+  * Prior to heating (`heat_active == 0` and `current_temp < target_temp - 2.0C`): "Add mash water & Press SET to start heating".
+  * Once strike temperature is reached (`current_temp >= target_temp - 2.0C`): "Strike temperature reached: Add grain".
 * `2`: Mash step complete (prompt: "Sparge water alert").
 * `3`: Boil temperature reached (prompt: "Boil started / add bittering hops").
 * `4`: Boil addition alert (prompt: "Add hop / fining addition").
 * `5`: Cooling stage prompt (prompt: "Connect counterflow chiller").
+
+### 4.3. Controller Brew Phase (`Stage` in Notification `Y`)
+
+The 7th parameter in the `Y` notification represents the controller's internal brew phase ($0..7$). It must **never** be used directly as the displayed mash step number:
+
+| Controller Stage | Brew Phase Name | Condition / Telemetry State | Display Name |
+| :---: | :--- | :--- | :--- |
+| **0** | Idle | Controller not running a recipe | `"Idle"` |
+| **1** | Strike Water Fill & Ramp | `heat_active == 0 && current_temp < target_temp - 2.0C`<br/>`heat_active == 1 \|\| ramp_active == 1` | `"Add Strike Water"`<br/>`"Heating Strike Water"` |
+| **2** | Add Grain / Rest | Grain rest prompt or interaction code 1 with $T_{\text{cur}} \ge T_{\text{target}} - 2.0^\circ\text{C}$ | `"Add Grain"` |
+| **3** | First Mash Step | First programmed step ($3 - 2 = 1$) | `"Mash Step 1"` |
+| **4** | Second Mash Step | Second programmed step ($4 - 2 = 2$) | `"Mash Step 2"` |
+| **$2 + N$** | Mash Step $N$ | Programmed step $N$ ($stage - 2$) | `"Mash Step N"` |
+| **Sparge** | Sparge Alert | Interaction code 2 | `"Sparge"` |
+| **Boil Ramp**| Heating to Boil | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 1` | `"Heating to Boil"` |
+| **Boil** | Boiling | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 0` | `"Boiling"` |
+| **Cooling** | Counterflow Chilling | Interaction code 5 | `"Cooling"` |
+
+### 4.4. Timer Telemetry & Operational States
+
+1. **Ramping Phase**:
+   When ramping to a mash step or boil setpoint, the controller sets `ramp_active = true` but keeps `timer.active = false`. The UI/telemetry must present the scheduled step duration with state `Heating to Setpoint` (`starts at temp`).
+2. **Active Countdown**:
+   Once target temperature is reached, the G30 controller beeps and initiates the countdown. The `T` notification (`T{Active},{LeftMin},{TotalMin},{LeftSec}`) provides remaining seconds (`LeftSec`) and total seconds (`TotalMin * 60`).
+3. **Paused State**:
+   Timer pause is signaled via the 2nd field of the `W` notification (`W{PwrPct},{Paused},...`). Outbound command `G` toggles the pause/resume state.
 
 ---
 
@@ -266,7 +292,9 @@ Available `action` verbs:
 * `"resume_timer"`: `{}`
 * `"cancel_timer"`: `{}`
 * `"ack_interaction"`: `{}`
+* `"press_set"`: `{}`
 * `"dismiss_alert"`: `{}`
+* `"cancel_session"`: `{}`
 * `"load_recipe"`:
   ```json
   {
