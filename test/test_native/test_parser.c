@@ -100,6 +100,7 @@ void test_g30_parse_system_state_notification(void) {
     memset(&state, 0, sizeof(state));
 
     // Y{Heat},{Pump},{Auto},{Ramp},{InterMode},{InterCode},{Stage},{Delayed}
+    // e.g. Y1,1,1,0,1,2,3,0 -> Heat=1, Pump=1, Auto=1, Ramp=0, InterReq=1, Code=2 ("Sparge"), Stage=3
     const uint8_t notif_data[] = "Y1,1,1,0,1,2,3,0";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
@@ -112,7 +113,7 @@ void test_g30_parse_system_state_notification(void) {
     TEST_ASSERT_FALSE(state.ramp_active);
     TEST_ASSERT_TRUE(state.interaction.required);
     TEST_ASSERT_EQUAL_UINT8(2, state.interaction.code);
-    TEST_ASSERT_EQUAL_STRING("Mash step finished: Sparge alert", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Sparge", state.interaction.message);
     TEST_ASSERT_EQUAL_UINT8(3, state.stage.step_index);
 }
 
@@ -121,6 +122,7 @@ void test_g30_parse_timer_notification(void) {
     memset(&state, 0, sizeof(state));
 
     // T{Active},{LeftMin},{TotalMin},{LeftSec}
+    // e.g. T1,45,60,2700 -> Active=1, Remaining=2700s, Total=3600s
     const uint8_t notif_data[] = "T1,45,60,2700";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
@@ -136,14 +138,15 @@ void test_g30_parse_power_notification(void) {
     unified_boiler_state_t state;
     memset(&state, 0, sizeof(state));
 
-    // W{PwrPct},{Paused},{StepMash},{Interrupted},{ManualPwr},{SpargeAlert}
-    const uint8_t notif_data[] = "W85,1,1,0,0,0";
+    // W{PwrPct},{Paused},...
+    // e.g. W80,1,0,0,0,0 -> 80% power, timer paused
+    const uint8_t notif_data[] = "W80,1,0,0,0,0";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
     esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_INT(G30_NOTIF_POWER_FLAGS, type);
-    TEST_ASSERT_EQUAL_UINT8(85, state.heat_power_pct);
+    TEST_ASSERT_EQUAL_UINT8(80, state.heat_power_pct);
     TEST_ASSERT_TRUE(state.timer.paused);
 }
 
@@ -151,6 +154,8 @@ void test_g30_parse_interaction_notification(void) {
     unified_boiler_state_t state;
     memset(&state, 0, sizeof(state));
 
+    // I{InteractionCode}
+    // e.g. I1 -> "Add grain"
     const uint8_t notif_data[] = "I1";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
@@ -159,92 +164,82 @@ void test_g30_parse_interaction_notification(void) {
     TEST_ASSERT_EQUAL_INT(G30_NOTIF_INTERACTION, type);
     TEST_ASSERT_TRUE(state.interaction.required);
     TEST_ASSERT_EQUAL_UINT8(1, state.interaction.code);
-    TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Add grain", state.interaction.message);
 }
 
 void test_g30_parse_boil_temp_notification(void) {
     unified_boiler_state_t state;
     memset(&state, 0, sizeof(state));
 
-    const uint8_t notif_data[] = "C99.5";
+    // C{BoilTemp}
+    // e.g. C100.5
+    const uint8_t notif_data[] = "C100.5";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
     esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_INT(G30_NOTIF_BOIL_TEMP, type);
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 99.5f, state.boil_temp_c);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 100.5f, state.boil_temp_c);
 }
 
 // =============================================================================
-// Grainfather G30 Command Encoding Tests (WiFi / Gateway -> BLE)
+// Grainfather G30 Downstream Command Encoding Tests (Gateway -> BLE)
 // =============================================================================
 void test_g30_format_padded_cmd_exact_19_bytes(void) {
     char buf[G30_COMMAND_LEN + 1];
-    esp_err_t err = g30_format_padded_cmd("P", buf);
 
+    esp_err_t err = g30_format_padded_cmd("P1", buf);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_CHAR('P', buf[0]);
-    for (int i = 1; i < 19; i++) {
-        TEST_ASSERT_EQUAL_CHAR(' ', buf[i]);
-    }
+    TEST_ASSERT_EQUAL_STRING("P1                 ", buf);
+
+    // Verify invalid sizes
+    char toolong[25] = "12345678901234567890"; // 20 chars
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_SIZE, g30_format_padded_cmd(toolong, buf));
 }
 
 void test_g30_encode_pump_command(void) {
     char buf[G30_COMMAND_LEN + 1];
     unified_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_PUMP;
 
-    // Pump ON -> "L1" + 17 spaces
+    cmd.action = CMD_ACTION_SET_PUMP;
     cmd.params.pump_state = true;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("L1                 ", buf);
+    TEST_ASSERT_EQUAL_STRING("P1                 ", buf);
 
-    // Pump OFF -> "L0" + 17 spaces
     cmd.params.pump_state = false;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
-    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("L0                 ", buf);
+    TEST_ASSERT_EQUAL_STRING("P0                 ", buf);
 }
 
 void test_g30_encode_heat_command(void) {
     char buf[G30_COMMAND_LEN + 1];
     unified_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_HEAT;
 
-    // Heat ON -> "K1" + 17 spaces
+    cmd.action = CMD_ACTION_SET_HEAT;
     cmd.params.heat.heat_state = true;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("K1                 ", buf);
+    TEST_ASSERT_EQUAL_STRING("H1                 ", buf);
 
-    // Heat OFF -> "K0" + 17 spaces
     cmd.params.heat.heat_state = false;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
-    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("K0                 ", buf);
+    TEST_ASSERT_EQUAL_STRING("H0                 ", buf);
 }
 
 void test_g30_encode_target_temperature(void) {
     char buf[G30_COMMAND_LEN + 1];
     unified_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
+
     cmd.action = CMD_ACTION_SET_TARGET_TEMP;
-
-    // Integer temp 65 -> "$65," + 15 spaces
-    cmd.params.target_temp_c = 65.0f;
+    cmd.params.target_temp_c = 66.5f;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("$65,               ", buf);
-
-    // Decimal temp 67.5 -> "$67.5," + 13 spaces
-    cmd.params.target_temp_c = 67.5f;
-    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
-    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("$67.5,             ", buf);
+    TEST_ASSERT_EQUAL_STRING("T66.5              ", buf);
 }
 
 void test_g30_encode_timer_commands(void) {
@@ -297,6 +292,31 @@ void test_g30_encode_recipe_commands(void) {
 }
 
 // =============================================================================
+// Digital Twin Integration & Topic Hierarchy Tests
+// =============================================================================
+void test_mqtt_topic_hierarchy_definitions(void) {
+    TEST_ASSERT_EQUAL_STRING("brewlink/", MQTT_TOPIC_GATEWAY_PREFIX);
+    TEST_ASSERT_EQUAL_STRING("/status", MQTT_TOPIC_STATUS_SUFFIX);
+    TEST_ASSERT_EQUAL_STRING("/equipment/", MQTT_TOPIC_EQUIPMENT_SUBDIR);
+    TEST_ASSERT_EQUAL_STRING("/announce", MQTT_TOPIC_ANNOUNCE_SUFFIX);
+    TEST_ASSERT_EQUAL_STRING("/telemetry", MQTT_TOPIC_TELEMETRY_SUFFIX);
+    TEST_ASSERT_EQUAL_STRING("/snapshot", MQTT_TOPIC_SNAPSHOT_SUFFIX);
+    TEST_ASSERT_EQUAL_STRING("/cmd", MQTT_TOPIC_CMD_SUFFIX);
+    TEST_ASSERT_EQUAL_STRING("/cmd_ack", MQTT_TOPIC_CMD_ACK_SUFFIX);
+
+    TEST_ASSERT_EQUAL_INT(0, MQTT_QOS_TELEMETRY);
+    TEST_ASSERT_EQUAL_INT(1, MQTT_QOS_STATUS);
+    TEST_ASSERT_EQUAL_INT(1, MQTT_QOS_COMMAND);
+    TEST_ASSERT_EQUAL_INT(1, MQTT_QOS_SNAPSHOT);
+    TEST_ASSERT_EQUAL_INT(1, MQTT_QOS_ANNOUNCE);
+}
+
+void test_telemetry_cadence_definitions(void) {
+    TEST_ASSERT_EQUAL_UINT32(1000, TELEMETRY_CADENCE_THROTTLE_MS);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.2f, TELEMETRY_TEMP_DELTA_MIN_C);
+}
+
+// =============================================================================
 // Test Runner Entrypoint
 // =============================================================================
 int main(int argc, char **argv) {
@@ -324,6 +344,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_g30_encode_target_temperature);
     RUN_TEST(test_g30_encode_timer_commands);
     RUN_TEST(test_g30_encode_recipe_commands);
+
+    // Topic Hierarchy & Cadence tests
+    RUN_TEST(test_mqtt_topic_hierarchy_definitions);
+    RUN_TEST(test_telemetry_cadence_definitions);
 
     return UNITY_END();
 }

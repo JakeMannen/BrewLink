@@ -94,18 +94,36 @@ typedef struct {
 #define WEB_SERVER_STACK_SIZE               8192
 
 // =============================================================================
-// MQTT Topics & QoS
+// MQTT Topics, Hierarchy & QoS
 // =============================================================================
+#define GATEWAY_ID_MAX_LEN                  16
+
+#define MQTT_TOPIC_GATEWAY_PREFIX           "brewlink/"
+#define MQTT_TOPIC_STATUS_SUFFIX            "/status"
+#define MQTT_TOPIC_EQUIPMENT_SUBDIR         "/equipment/"
+#define MQTT_TOPIC_ANNOUNCE_SUFFIX          "/announce"
+#define MQTT_TOPIC_TELEMETRY_SUFFIX         "/telemetry"
+#define MQTT_TOPIC_SNAPSHOT_SUFFIX          "/snapshot"
+#define MQTT_TOPIC_CMD_SUFFIX               "/cmd"
+#define MQTT_TOPIC_CMD_ACK_SUFFIX           "/cmd_ack"
+
+// Legacy/Compatibility topic definitions
 #define MQTT_TOPIC_STATUS                   "brewlink/gateway/status"
 #define MQTT_TOPIC_GATEWAY_CMD              "brewlink/gateway/cmd"
 #define MQTT_TOPIC_DEVICE_PREFIX            "brewlink/device/"
-#define MQTT_TOPIC_TELEMETRY_SUFFIX         "/telemetry"
-#define MQTT_TOPIC_CMD_SUFFIX               "/cmd"
 #define MQTT_TOPIC_CMD_WILDCARD             "brewlink/device/+/cmd"
 
 #define MQTT_QOS_TELEMETRY                  0
 #define MQTT_QOS_STATUS                     1
 #define MQTT_QOS_COMMAND                    1
+#define MQTT_QOS_SNAPSHOT                   1
+#define MQTT_QOS_ANNOUNCE                   1
+
+// =============================================================================
+// Telemetry Streaming Cadence & Hysteresis Filtering
+// =============================================================================
+#define TELEMETRY_CADENCE_THROTTLE_MS       1000   // 1 Hz rate limit for continuous metrics
+#define TELEMETRY_TEMP_DELTA_MIN_C          0.2f   // Minimum temperature change to trigger immediate update
 
 #ifdef __cplusplus
 }
