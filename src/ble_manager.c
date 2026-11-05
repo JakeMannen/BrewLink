@@ -48,7 +48,8 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static int ble_on_mtu(uint16_t conn_handle, const struct ble_gatt_error *error, uint16_t mtu, void *arg);
 static int ble_on_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *error, const struct ble_gatt_svc *service, void *arg);
 static int ble_on_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *error, const struct ble_gatt_chr *chr, void *arg);
-static int ble_on_notify(uint16_t conn_handle, const struct ble_gatt_error *error, struct ble_gatt_attr *attr, void *arg);
+static int ble_on_cccd_write(uint16_t conn_handle, const struct ble_gatt_error *error, struct ble_gatt_attr *attr, void *arg);
+static void ble_handle_notify_rx(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf *om);
 
 static int find_peer_by_handle(uint16_t conn_handle) {
     for (int i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
@@ -82,7 +83,7 @@ static void ble_cmd_worker_task(void *pvParameters) {
 
             if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 int peer_idx = -1;
-                if (target_handle != BLE_HS_CONN_HANDLE_NONE && target_handle != 0) {
+                if (target_handle != BLE_HS_CONN_HANDLE_NONE) {
                     peer_idx = find_peer_by_handle(target_handle);
                 } else {
                     bool has_mac = false;
@@ -100,29 +101,34 @@ static void ble_cmd_worker_task(void *pvParameters) {
                                 break;
                             }
                         }
-                    } else if (s_peers[0].connected) {
-                        peer_idx = 0;
-                        target_handle = s_peers[0].conn_handle;
+                    } else {
+                        for (int i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+                            if (s_peers[i].connected) {
+                                peer_idx = i;
+                                target_handle = s_peers[i].conn_handle;
+                                break;
+                            }
+                        }
                     }
                 }
 
                 if (peer_idx >= 0 && s_peers[peer_idx].connected) {
-                    write_handle = s_peers[peer_idx].write_val_handle != 0 ?
-                                   s_peers[peer_idx].write_val_handle : 0x000E;
+                    write_handle = s_peers[peer_idx].write_val_handle;
                 }
                 xSemaphoreGive(s_ble_mutex);
             }
 
             if (target_handle != BLE_HS_CONN_HANDLE_NONE && write_handle != 0) {
-                ESP_LOGI(TAG, "Writing BLE command to handle %d: '%.*s'", target_handle, cmd_pkt.len, cmd_pkt.cmd_bytes);
-                int rc = ble_gattc_write_flat(target_handle, write_handle,
-                                              cmd_pkt.cmd_bytes, cmd_pkt.len,
-                                              NULL, NULL);
+                ESP_LOGI(TAG, "Writing BLE command to conn %d (handle 0x%04X): '%.*s'",
+                         target_handle, write_handle, cmd_pkt.len, cmd_pkt.cmd_bytes);
+                int rc = ble_gattc_write_no_rsp_flat(target_handle, write_handle,
+                                                     cmd_pkt.cmd_bytes, cmd_pkt.len);
                 if (rc != 0) {
-                    ESP_LOGE(TAG, "ble_gattc_write_flat failed: rc=%d", rc);
+                    ESP_LOGE(TAG, "ble_gattc_write_no_rsp_flat failed: rc=%d", rc);
                 }
             } else {
-                ESP_LOGW(TAG, "Cannot dispatch command; no active BLE connection handle or matching peer");
+                ESP_LOGW(TAG, "Cannot dispatch command; no active BLE connection handle or write handle (conn=%d, write_handle=0x%04X)",
+                         target_handle, write_handle);
             }
 
             uint16_t delay_ms = cmd_pkt.delay_after_ms > 0 ? cmd_pkt.delay_after_ms : G30_WRITE_PACING_MS;
@@ -134,30 +140,43 @@ static void ble_cmd_worker_task(void *pvParameters) {
 // -----------------------------------------------------------------------------
 // GATT Callbacks (Decoupled Handoff Pattern)
 // -----------------------------------------------------------------------------
-static int ble_on_notify(uint16_t conn_handle, const struct ble_gatt_error *error,
-                         struct ble_gatt_attr *attr, void *arg) {
-    if (attr != NULL && attr->om != NULL) {
-        ble_telemetry_packet_t packet;
-        memset(&packet, 0, sizeof(packet));
+static void ble_handle_notify_rx(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf *om) {
+    if (om == NULL) {
+        return;
+    }
 
+    ble_telemetry_packet_t packet;
+    memset(&packet, 0, sizeof(packet));
+
+    if (xSemaphoreTake(s_ble_mutex, 0) == pdTRUE) {
         int peer_idx = find_peer_by_handle(conn_handle);
         if (peer_idx >= 0) {
             packet.device_index = (uint8_t)peer_idx;
             memcpy(packet.mac, s_peers[peer_idx].addr, 6);
             packet.rssi = s_peers[peer_idx].rssi;
         }
+        xSemaphoreGive(s_ble_mutex);
+    }
 
-        packet.handle = attr->handle;
-        packet.len = OS_MBUF_PKTLEN(attr->om);
-        if (packet.len > BLE_MAX_PAYLOAD_SIZE) {
-            packet.len = BLE_MAX_PAYLOAD_SIZE;
-        }
-        os_mbuf_copydata(attr->om, 0, packet.len, packet.data);
-        packet.timestamp_ms = esp_log_timestamp();
+    packet.handle = attr_handle;
+    packet.len = OS_MBUF_PKTLEN(om);
+    if (packet.len > BLE_MAX_PAYLOAD_SIZE) {
+        packet.len = BLE_MAX_PAYLOAD_SIZE;
+    }
+    os_mbuf_copydata(om, 0, packet.len, packet.data);
+    packet.timestamp_ms = esp_log_timestamp();
 
-        if (s_telemetry_queue != NULL) {
-            xQueueSendToBack(s_telemetry_queue, &packet, 0);
-        }
+    if (s_telemetry_queue != NULL) {
+        xQueueSendToBack(s_telemetry_queue, &packet, 0);
+    }
+}
+
+static int ble_on_cccd_write(uint16_t conn_handle, const struct ble_gatt_error *error,
+                             struct ble_gatt_attr *attr, void *arg) {
+    if (error->status == 0) {
+        ESP_LOGI(TAG, "CCCD subscription confirmed for conn %d", conn_handle);
+    } else {
+        ESP_LOGE(TAG, "CCCD subscription failed for conn %d: status=%d", conn_handle, error->status);
     }
     return 0;
 }
@@ -165,25 +184,29 @@ static int ble_on_notify(uint16_t conn_handle, const struct ble_gatt_error *erro
 static int ble_on_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *error,
                            const struct ble_gatt_chr *chr, void *arg) {
     if (error->status == 0 && chr != NULL) {
-        ble_peer_device_t peer_copy;
-        bool newly_discovered = false;
-
         if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             int peer_idx = find_peer_by_handle(conn_handle);
             if (peer_idx >= 0) {
                 if (ble_uuid_cmp(&chr->uuid.u, &s_g30_notify_uuid.u) == 0) {
                     s_peers[peer_idx].notify_val_handle = chr->val_handle;
                     ESP_LOGI(TAG, "Resolved G30 Notify characteristic handle: 0x%04X", chr->val_handle);
-
-                    // Subscribe to CCCD (descriptor handle is typically val_handle + 1)
-                    uint8_t cccd_val[2] = {0x01, 0x00};
-                    ble_gattc_write_flat(conn_handle, chr->val_handle + 1, cccd_val, sizeof(cccd_val), NULL, NULL);
-                    ESP_LOGI(TAG, "Subscribed to CCCD at handle 0x%04X", chr->val_handle + 1);
                 } else if (ble_uuid_cmp(&chr->uuid.u, &s_g30_write_uuid.u) == 0) {
                     s_peers[peer_idx].write_val_handle = chr->val_handle;
                     ESP_LOGI(TAG, "Resolved G30 Write characteristic handle: 0x%04X", chr->val_handle);
                 }
+            }
+            xSemaphoreGive(s_ble_mutex);
+        }
+    } else if (chr == NULL) {
+        ESP_LOGI(TAG, "Characteristic discovery complete for conn %d", conn_handle);
+        ble_peer_device_t peer_copy;
+        bool newly_discovered = false;
+        uint16_t notify_handle = 0;
 
+        if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            int peer_idx = find_peer_by_handle(conn_handle);
+            if (peer_idx >= 0) {
+                notify_handle = s_peers[peer_idx].notify_val_handle;
                 if (s_peers[peer_idx].notify_val_handle != 0 &&
                     s_peers[peer_idx].write_val_handle != 0 &&
                     !s_peers[peer_idx].services_discovered) {
@@ -193,6 +216,17 @@ static int ble_on_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *er
                 }
             }
             xSemaphoreGive(s_ble_mutex);
+        }
+
+        // Subscribe to CCCD now that characteristic discovery has completed
+        if (notify_handle != 0) {
+            uint8_t cccd_val[2] = {0x01, 0x00};
+            uint16_t cccd_handle = notify_handle + 1;
+            ESP_LOGI(TAG, "Subscribing to CCCD at handle 0x%04X for conn %d...", cccd_handle, conn_handle);
+            int rc = ble_gattc_write_flat(conn_handle, cccd_handle, cccd_val, sizeof(cccd_val), ble_on_cccd_write, NULL);
+            if (rc != 0) {
+                ESP_LOGE(TAG, "Failed to initiate CCCD subscription write: rc=%d", rc);
+            }
         }
 
         if (newly_discovered && s_peer_cb != NULL) {
@@ -210,7 +244,6 @@ static int ble_on_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *er
             if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 int peer_idx = find_peer_by_handle(conn_handle);
                 if (peer_idx >= 0) {
-                    s_peers[peer_idx].services_discovered = true;
                     s_peers[peer_idx].equipment_type = EQUIPMENT_TYPE_BOILER;
                 }
                 xSemaphoreGive(s_ble_mutex);
@@ -221,7 +254,7 @@ static int ble_on_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *er
         // Discovery finished; verify if a compatible service was found
         if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             int peer_idx = find_peer_by_handle(conn_handle);
-            if (peer_idx >= 0 && !s_peers[peer_idx].services_discovered) {
+            if (peer_idx >= 0 && s_peers[peer_idx].equipment_type == EQUIPMENT_TYPE_UNKNOWN) {
                 ESP_LOGW(TAG, "Connected device on handle %d offers no compatible brewing service; disconnecting", conn_handle);
                 ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             }
@@ -402,6 +435,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
         case BLE_GAP_EVENT_DISC_COMPLETE:
             ESP_LOGI(TAG, "BLE discovery scan complete");
             s_is_scanning = false;
+            return 0;
+
+        case BLE_GAP_EVENT_NOTIFY_RX:
+            ble_handle_notify_rx(event->notify_rx.conn_handle,
+                                 event->notify_rx.attr_handle,
+                                 event->notify_rx.om);
             return 0;
 
         default:
