@@ -92,6 +92,10 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
     *   `main` is always stable and passing CI.
     *   Short-lived branches off `main` (`feat/*`, `fix/*`, `chore/*`).
     *   Conventional Commit messages and PR templates with hardware testing notes.
+5.  **[Host Environment Protection & Zero-Installation Policy](.agents/rules/05-host-environment-protection.md)**:
+    *   **NEVER install software on the host computer** (no frameworks, runtimes, package manager installs, compilers, drivers, or addons).
+    *   All compilation and toolchains reside inside the VS Code Devcontainer (`devcontainer exec ...`).
+    *   If a tool or framework is missing and required to proceed, **immediately prompt the user** with instructions to install it manually and await confirmation.
 
 ---
 

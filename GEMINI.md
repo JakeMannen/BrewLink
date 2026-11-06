@@ -7,6 +7,7 @@ This workspace operates under the authoritative rules and skills defined in [AGE
 *   [`02-coding-standards.md`](.agents/rules/02-coding-standards.md) — ESP-IDF idioms, `esp_err_t` checking, tagged logging, thread safety, and mandatory post-edit build verification (`devcontainer exec pio run -e esp32dev -t build`).
 *   [`03-security-secrets.md`](.agents/rules/03-security-secrets.md) — Secrets hygiene and `secrets.h` exclusion.
 *   [`04-github-flow.md`](.agents/rules/04-github-flow.md) — Git safety rules (never push to main, never force push, new session/feature on branch from updated main), branching standards, conventional commits, and PR verification.
+*   [`05-host-environment-protection.md`](.agents/rules/05-host-environment-protection.md) — Zero host installation policy (never install frameworks, addons, or tools on host; prompt user if blocked).
 
 ### 2. Operational Skills
 *   [`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md) — VS Code Devcontainer, PlatformIO CLI builds, check, flash, monitor, size, and tests.
