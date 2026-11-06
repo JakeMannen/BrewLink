@@ -81,6 +81,7 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
     *   Return and verify `esp_err_t` on all fallible operations.
     *   Tagged logging with `ESP_LOGI`, `ESP_LOGW`, `ESP_LOGE`, `ESP_LOGD`. No raw `printf()`.
     *   Thread safety via FreeRTOS Mutexes and Queues. Include guards and C++ extern wrappers on all headers.
+    *   **Post-Edit Build Verification**: Always run `devcontainer exec pio run -e esp32dev -t build` after finishing ESP code edits and fix any build errors.
 3.  **[Secrets & Security Policy](.agents/rules/03-security-secrets.md)**:
     *   Never commit credentials, SSIDs, passwords, or tokens.
     *   Real secrets remain in `include/secrets.h` (gitignored). Keep `include/secrets.example.h` updated.
@@ -99,7 +100,7 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
 When executing specific implementation or operational tasks, agents activate the specialized runbooks located in `.agents/skills/`:
 
 *   **[`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md)**:
-    *   *Usage*: Compiling (`pio run -e esp32dev`), static code analysis (`pio check`), flash/monitor, memory footprint sizing, running host unit tests (`pio test -e native`), and VS Code IntelliSense index generation.
+    *   *Usage*: Compiling (`pio run -e esp32dev` or `devcontainer exec pio run -e esp32dev -t build`), static code analysis (`pio check`), flash/monitor, memory footprint sizing, running host unit tests (`pio test -e native`), and VS Code IntelliSense index generation.
 *   **[`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md)**:
     *   *Usage*: Implementing and debugging the Apache NimBLE Central subsystem: peer tracking table, active scanning, MTU exchange, GATT characteristic discovery, CCCD notification subscription, and decoupled FreeRTOS queue handoff.
 *   **[`outbound-relay`](.agents/skills/outbound-relay/SKILL.md)**:

@@ -23,11 +23,16 @@ This skill guides the agent through compiling, flashing, monitoring, testing, an
 
 ## 2. Standard Build & Verification Procedures
 
-### 2.1. Compile Firmware
-To compile the `esp32dev` target:
-```bash
-pio run -e esp32dev
-```
+### 2.1. Compile Firmware & Post-Edit Build Verification (MANDATORY)
+* **Agent Rule**: Always run the build command immediately after finishing ESP code edits and fix any compiler/build errors.
+* **From Host (Agent Execution)**:
+  ```bash
+  devcontainer exec pio run -e esp32dev -t build
+  ```
+* **Inside Devcontainer**:
+  ```bash
+  pio run -e esp32dev -t build
+  ```
 
 ### 2.2. Static Code Analysis
 Run static analysis with PlatformIO check:
@@ -80,7 +85,7 @@ usbipd attach --wsl --busid <BUSID>
    ```
 
 ### 3.3. When Flashing Hardware is Unavailable to Agent
-If operating in an isolated sandbox, run compilation (`pio run -e esp32dev`) and instruct the user to execute the flash command from their VS Code terminal.
+If operating in an isolated sandbox, run compilation (`devcontainer exec pio run -e esp32dev -t build`) and instruct the user to execute the flash command from their VS Code terminal.
 
 ---
 
