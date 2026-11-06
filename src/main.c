@@ -169,13 +169,32 @@ esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    unified_boiler_state_t cur_state;
+    memset(&cur_state, 0, sizeof(cur_state));
     bool connected = false;
     uint8_t target_mac[6] = {0};
     int8_t rssi = 0;
-    g30_controller_get_state(NULL, &connected, target_mac, &rssi);
+    g30_controller_get_state(&cur_state, &connected, target_mac, &rssi);
     if (!connected) {
         ESP_LOGW(TAG, "Cannot dispatch G30 command: controller not connected");
         return ESP_ERR_NOT_FOUND;
+    }
+
+    // When a recipe process is ongoing (auto_mode == true), the G30 hardware controller is master.
+    // BrewLink must never send its own timers or temperature steps during an active recipe.
+    if (cur_state.auto_mode &&
+        (cmd->action == CMD_ACTION_SET_TIMER ||
+         cmd->action == CMD_ACTION_CANCEL_TIMER ||
+         cmd->action == CMD_ACTION_SET_TARGET_TEMP)) {
+        ESP_LOGW(TAG, "Rejected command action %d: G30 controller is master while recipe is ongoing", cmd->action);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    unified_command_t effective_cmd = *cmd;
+    if (effective_cmd.action == CMD_ACTION_ACK_INTERACTION) {
+        if (cur_state.interaction.code == 5) {
+            effective_cmd.action = CMD_ACTION_DISMISS_ALERT;
+        }
     }
 
     ble_outbound_cmd_packet_t outbound_pkt;
@@ -183,13 +202,13 @@ esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
 
     bool has_mac = false;
     for (int i = 0; i < 6; i++) {
-        if (cmd->target_mac[i] != 0) {
+        if (effective_cmd.target_mac[i] != 0) {
             has_mac = true;
             break;
         }
     }
     if (has_mac) {
-        memcpy(outbound_pkt.mac, cmd->target_mac, 6);
+        memcpy(outbound_pkt.mac, effective_cmd.target_mac, 6);
     } else {
         memcpy(outbound_pkt.mac, target_mac, 6);
     }
@@ -198,9 +217,9 @@ esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
     outbound_pkt.len = G30_COMMAND_LEN;
     outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
 
-    esp_err_t enc_err = g30_encode_command(cmd, outbound_pkt.cmd_bytes);
+    esp_err_t enc_err = g30_encode_command(&effective_cmd, outbound_pkt.cmd_bytes);
     if (enc_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to encode G30 command action %d: 0x%x", cmd->action, enc_err);
+        ESP_LOGE(TAG, "Failed to encode G30 command action %d: 0x%x", effective_cmd.action, enc_err);
         return enc_err;
     }
 
@@ -241,10 +260,15 @@ esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
         s_g30_state.stage.step_index = 1;
         s_g30_state.heat_active = false;
         s_g30_state.ramp_active = false;
+        s_g30_state.timer.active = false;
+        s_g30_state.timer.paused = false;
+        s_g30_state.timer.remaining_seconds = 0;
+        s_g30_state.timer.total_seconds = 0;
         if (recipe->mash_step_count > 0) {
             s_g30_state.target_temp_c = recipe->mash_steps[0].temp_c;
         }
         s_g30_state.interaction.required = true;
+        s_g30_state.interaction.code = 1;
         if (recipe->mash_water_l > 0.0f) {
             snprintf(s_g30_state.interaction.message, sizeof(s_g30_state.interaction.message),
                      "Add %.1fL water & Press SET to start heating", recipe->mash_water_l);
@@ -293,7 +317,7 @@ esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
     }
 
     // Line 4: Boil Parameters ({hop_stand_min},{boil_addition_count},0,0,)
-    err = g30_encode_recipe_boil_params(0, recipe->boil_addition_count, outbound_pkt.cmd_bytes);
+    err = g30_encode_recipe_boil_params(recipe->hop_stand_min, recipe->boil_addition_count, outbound_pkt.cmd_bytes);
     if (err != ESP_OK) {
         return err;
     }
@@ -434,6 +458,9 @@ static void process_inbound_command(const char *topic, const char *payload, int 
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
         cmd.action = CMD_ACTION_DISMISS_ALERT;
         handled = true;
+    } else if (strcmp(action_str, "dismiss_sparge_alert") == 0) {
+        cmd.action = CMD_ACTION_DISMISS_SPARGE_ALERT;
+        handled = true;
     } else if (strcmp(action_str, "cancel_session") == 0) {
         cmd.action = CMD_ACTION_CANCEL_SESSION;
         handled = true;
@@ -446,6 +473,7 @@ static void process_inbound_command(const char *topic, const char *payload, int 
         if (rec) {
             cJSON *name = cJSON_GetObjectItem(rec, "name");
             cJSON *boil_time = cJSON_GetObjectItem(rec, "boil_time_min");
+            cJSON *hop_stand = cJSON_GetObjectItem(rec, "hop_stand_min");
             cJSON *mash_water = cJSON_GetObjectItem(rec, "mash_water_l");
             cJSON *sparge_water = cJSON_GetObjectItem(rec, "sparge_water_l");
 
@@ -453,6 +481,7 @@ static void process_inbound_command(const char *topic, const char *payload, int 
                 strncpy(cmd.params.recipe.name, name->valuestring, sizeof(cmd.params.recipe.name) - 1);
             }
             cmd.params.recipe.boil_time_min = boil_time ? (uint16_t)boil_time->valueint : 60;
+            cmd.params.recipe.hop_stand_min = (hop_stand && cJSON_IsNumber(hop_stand) && hop_stand->valueint > 0) ? (uint16_t)hop_stand->valueint : 0;
             cmd.params.recipe.mash_water_l = mash_water ? (float)mash_water->valuedouble : 0.0f;
             cmd.params.recipe.sparge_water_l = sparge_water ? (float)sparge_water->valuedouble : 0.0f;
 

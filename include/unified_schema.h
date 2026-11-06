@@ -105,6 +105,7 @@ typedef struct {
 typedef struct {
     char                name[MAX_RECIPE_NAME_LEN];
     uint16_t            boil_time_min;
+    uint16_t            hop_stand_min;
     float               mash_water_l;
     float               sparge_water_l;
     uint8_t             mash_step_count;
@@ -117,19 +118,20 @@ typedef struct {
 // Unified Downstream Command Actions (WiFi / Dashboard -> Gateway -> BLE)
 // =============================================================================
 typedef enum {
-    CMD_ACTION_NONE             = 0,
-    CMD_ACTION_SET_PUMP         = 1,
-    CMD_ACTION_SET_HEAT         = 2,
-    CMD_ACTION_SET_TARGET_TEMP  = 3,
-    CMD_ACTION_SET_TIMER        = 4,
-    CMD_ACTION_PAUSE_TIMER      = 5,
-    CMD_ACTION_RESUME_TIMER     = 6,
-    CMD_ACTION_CANCEL_TIMER     = 7,
-    CMD_ACTION_ACK_INTERACTION  = 8,
-    CMD_ACTION_DISMISS_ALERT    = 9,
-    CMD_ACTION_LOAD_RECIPE      = 10,
-    CMD_ACTION_CANCEL_SESSION   = 11,
-    CMD_ACTION_PRESS_SET        = 12
+    CMD_ACTION_NONE                 = 0,
+    CMD_ACTION_SET_PUMP             = 1,
+    CMD_ACTION_SET_HEAT             = 2,
+    CMD_ACTION_SET_TARGET_TEMP      = 3,
+    CMD_ACTION_SET_TIMER            = 4,
+    CMD_ACTION_PAUSE_TIMER          = 5,
+    CMD_ACTION_RESUME_TIMER         = 6,
+    CMD_ACTION_CANCEL_TIMER         = 7,
+    CMD_ACTION_ACK_INTERACTION      = 8,
+    CMD_ACTION_DISMISS_ALERT        = 9,
+    CMD_ACTION_LOAD_RECIPE          = 10,
+    CMD_ACTION_CANCEL_SESSION       = 11,
+    CMD_ACTION_PRESS_SET            = 12,
+    CMD_ACTION_DISMISS_SPARGE_ALERT = 13
 } command_action_t;
 
 typedef struct {
