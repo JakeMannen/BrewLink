@@ -41,3 +41,12 @@ This rule enforces coding standards, error handling, thread safety, and logging 
     }
     #endif
     ```
+
+---
+
+## 5. Post-Edit Compilation & Build Verification (MANDATORY)
+*   **Always Run**: After finishing ESP code edits, always run:
+    ```bash
+    devcontainer exec pio run -e esp32dev -t build
+    ```
+*   **Fix Build Errors**: Immediately inspect compiler diagnostics and fix any syntax, type, header inclusion, or linker errors until the build succeeds cleanly before proceeding.

@@ -1,7 +1,7 @@
 ---
 name: vscode-platformio
 description: >-
-  Build, check, flash, monitor, and analyze memory for the Adafruit HUZZAH32 ESP-IDF v6.1 firmware within the VS Code Devcontainer using PlatformIO.
+  Build, check, flash, monitor, and analyze memory for the ESP32 (ESP-WROOM-32 / DevKitC / Feather) ESP-IDF v6.1 firmware within the VS Code Devcontainer using PlatformIO.
 ---
 
 # VS Code PlatformIO & Devcontainer Workflow Skill
@@ -23,11 +23,16 @@ This skill guides the agent through compiling, flashing, monitoring, testing, an
 
 ## 2. Standard Build & Verification Procedures
 
-### 2.1. Compile Firmware
-To compile the `featheresp32` target:
-```bash
-pio run -e featheresp32
-```
+### 2.1. Compile Firmware & Post-Edit Build Verification (MANDATORY)
+* **Agent Rule**: Always run the build command immediately after finishing ESP code edits and fix any compiler/build errors.
+* **From Host (Agent Execution)**:
+  ```bash
+  devcontainer exec pio run -e esp32dev -t build
+  ```
+* **Inside Devcontainer**:
+  ```bash
+  pio run -e esp32dev -t build
+  ```
 
 ### 2.2. Static Code Analysis
 Run static analysis with PlatformIO check:
@@ -38,7 +43,7 @@ pio check
 ### 2.3. Memory & Partition Inspection
 To verify RAM (SRAM) and Flash consumption against available limits:
 ```bash
-pio run -e featheresp32 -t size
+pio run -e esp32dev -t size
 ```
 
 ### 2.4. Host Unit Testing
@@ -58,7 +63,7 @@ pio run -t menuconfig
 ## 3. Flashing & Hardware Communication
 
 ### 3.1. USB Passthrough from Host (Windows / WSL2)
-If running on Windows host, attach the Adafruit Feather USB port (Silicon Labs CP2104) to WSL2/Docker:
+If running on Windows host, attach the ESP32 USB port (CP210x / CH340 / FTDI) to WSL2/Docker:
 ```powershell
 usbipd list
 usbipd bind --busid <BUSID>
@@ -70,9 +75,9 @@ usbipd attach --wsl --busid <BUSID>
    ```bash
    pio device list
    ```
-2. Flash firmware to connected Feather:
+2. Flash firmware to connected ESP32 board:
    ```bash
-   pio run -e featheresp32 -t upload
+   pio run -e esp32dev -t upload
    ```
 3. Open serial monitor at 115200 baud with backtrace decoding:
    ```bash
@@ -80,7 +85,7 @@ usbipd attach --wsl --busid <BUSID>
    ```
 
 ### 3.3. When Flashing Hardware is Unavailable to Agent
-If operating in an isolated sandbox, run compilation (`pio run -e featheresp32`) and instruct the user to execute the flash command from their VS Code terminal.
+If operating in an isolated sandbox, run compilation (`devcontainer exec pio run -e esp32dev -t build`) and instruct the user to execute the flash command from their VS Code terminal.
 
 ---
 

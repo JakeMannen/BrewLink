@@ -8,7 +8,7 @@ This is the primary governance document for Antigravity and any AI assistant ope
 
 *   **Project Name**: BrewLink
 *   **Role**: Senior Embedded Systems & IoT Architect.
-*   **Target Hardware**: **Adafruit HUZZAH32 Feather (ESP-WROOM-32)** (240 MHz dual-core Xtensa LX6, 520 KB SRAM, 4 MB Flash).
+*   **Target Hardware**: **ESP32 (ESP-WROOM-32 / DevKitC / Adafruit HUZZAH32)** (240 MHz dual-core Xtensa LX6, 520 KB SRAM, 4 MB Flash).
 *   **Framework**: **Native ESP-IDF** (v6.1) managed via PlatformIO.
 *   **Core Mission**: Maintain simultaneous BLE Central connections to **at least 3 external equipment devices** (Boilers, Fermenters, Coolers/Heaters), provide bidirectional control (read temperatures/states, write pump/heating controls, transfer brew recipes), map device telemetry to unified data schemas, and relay telemetry out over **WiFi (MQTT / HTTP)**. Initial scope focuses on the **Grainfather G30 Connect**, architected for multi-equipment expansion.
 *   **Development Environment**: **VS Code with Dev Containers (`ms-vscode-remote.remote-containers`) & PlatformIO IDE (`platformio.platformio-ide`)**.
@@ -26,7 +26,7 @@ flowchart TD
         D3["Cooler / Chiller"]
     end
 
-    subgraph HUZZAH32["Adafruit HUZZAH32 (Native ESP-IDF v6.1)"]
+    subgraph ESP32["ESP32 (Native ESP-IDF v6.1)"]
         subgraph Core0["Core 0 (Protocol Stacks)"]
             BLE["NimBLE Central Host<br/>(Max Conn >= 4)"]
             BLE_Writer["BLE Command Worker<br/>(150ms Pacing Enforcer)"]
@@ -81,6 +81,7 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
     *   Return and verify `esp_err_t` on all fallible operations.
     *   Tagged logging with `ESP_LOGI`, `ESP_LOGW`, `ESP_LOGE`, `ESP_LOGD`. No raw `printf()`.
     *   Thread safety via FreeRTOS Mutexes and Queues. Include guards and C++ extern wrappers on all headers.
+    *   **Post-Edit Build Verification**: Always run `devcontainer exec pio run -e esp32dev -t build` after finishing ESP code edits and fix any build errors.
 3.  **[Secrets & Security Policy](.agents/rules/03-security-secrets.md)**:
     *   Never commit credentials, SSIDs, passwords, or tokens.
     *   Real secrets remain in `include/secrets.h` (gitignored). Keep `include/secrets.example.h` updated.
@@ -91,6 +92,10 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
     *   `main` is always stable and passing CI.
     *   Short-lived branches off `main` (`feat/*`, `fix/*`, `chore/*`).
     *   Conventional Commit messages and PR templates with hardware testing notes.
+5.  **[Host Environment Protection & Zero-Installation Policy](.agents/rules/05-host-environment-protection.md)**:
+    *   **NEVER install software on the host computer** (no frameworks, runtimes, package manager installs, compilers, drivers, or addons).
+    *   All compilation and toolchains reside inside the VS Code Devcontainer (`devcontainer exec ...`).
+    *   If a tool or framework is missing and required to proceed, **immediately prompt the user** with instructions to install it manually and await confirmation.
 
 ---
 
@@ -99,7 +104,7 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
 When executing specific implementation or operational tasks, agents activate the specialized runbooks located in `.agents/skills/`:
 
 *   **[`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md)**:
-    *   *Usage*: Compiling (`pio run -e featheresp32`), static code analysis (`pio check`), flash/monitor, memory footprint sizing, running host unit tests (`pio test -e native`), and VS Code IntelliSense index generation.
+    *   *Usage*: Compiling (`pio run -e esp32dev` or `devcontainer exec pio run -e esp32dev -t build`), static code analysis (`pio check`), flash/monitor, memory footprint sizing, running host unit tests (`pio test -e native`), and VS Code IntelliSense index generation.
 *   **[`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md)**:
     *   *Usage*: Implementing and debugging the Apache NimBLE Central subsystem: peer tracking table, active scanning, MTU exchange, GATT characteristic discovery, CCCD notification subscription, and decoupled FreeRTOS queue handoff.
 *   **[`outbound-relay`](.agents/skills/outbound-relay/SKILL.md)**:
