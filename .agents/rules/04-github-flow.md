@@ -35,6 +35,6 @@ Use semantic, conventional commit messages:
 ---
 
 ## 4. Pull Requests & CI
-*   PRs must pass automated CI (`.github/workflows/ci.yml`) compiling `featheresp32`.
+*   PRs must pass automated CI (`.github/workflows/ci.yml`) compiling `esp32dev`.
 *   Document embedded testing notes: specify the number of BLE peripherals verified, RSSI levels, and heap stability before and after test.
 *   Squash and merge into `main` via Pull Request.

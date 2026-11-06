@@ -1,6 +1,6 @@
 # =========================================================================
 # ESP-IDF Configuration Defaults for BrewLink
-# Target: Adafruit HUZZAH32 Feather (ESP-WROOM-32)
+# Target: Generic ESP32 (ESP-WROOM-32 / DevKitC / Feather)
 # Multi-Device BLE Central (>= 3 Devices) + WiFi (MQTT/HTTP) Relay
 # =========================================================================
 

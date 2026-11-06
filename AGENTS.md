@@ -8,7 +8,7 @@ This is the primary governance document for Antigravity and any AI assistant ope
 
 *   **Project Name**: BrewLink
 *   **Role**: Senior Embedded Systems & IoT Architect.
-*   **Target Hardware**: **Adafruit HUZZAH32 Feather (ESP-WROOM-32)** (240 MHz dual-core Xtensa LX6, 520 KB SRAM, 4 MB Flash).
+*   **Target Hardware**: **ESP32 (ESP-WROOM-32 / DevKitC / Adafruit HUZZAH32)** (240 MHz dual-core Xtensa LX6, 520 KB SRAM, 4 MB Flash).
 *   **Framework**: **Native ESP-IDF** (v6.1) managed via PlatformIO.
 *   **Core Mission**: Maintain simultaneous BLE Central connections to **at least 3 external equipment devices** (Boilers, Fermenters, Coolers/Heaters), provide bidirectional control (read temperatures/states, write pump/heating controls, transfer brew recipes), map device telemetry to unified data schemas, and relay telemetry out over **WiFi (MQTT / HTTP)**. Initial scope focuses on the **Grainfather G30 Connect**, architected for multi-equipment expansion.
 *   **Development Environment**: **VS Code with Dev Containers (`ms-vscode-remote.remote-containers`) & PlatformIO IDE (`platformio.platformio-ide`)**.
@@ -26,7 +26,7 @@ flowchart TD
         D3["Cooler / Chiller"]
     end
 
-    subgraph HUZZAH32["Adafruit HUZZAH32 (Native ESP-IDF v6.1)"]
+    subgraph ESP32["ESP32 (Native ESP-IDF v6.1)"]
         subgraph Core0["Core 0 (Protocol Stacks)"]
             BLE["NimBLE Central Host<br/>(Max Conn >= 4)"]
             BLE_Writer["BLE Command Worker<br/>(150ms Pacing Enforcer)"]
@@ -99,7 +99,7 @@ All agents must strictly obey the non-negotiable architectural and behavioral ru
 When executing specific implementation or operational tasks, agents activate the specialized runbooks located in `.agents/skills/`:
 
 *   **[`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md)**:
-    *   *Usage*: Compiling (`pio run -e featheresp32`), static code analysis (`pio check`), flash/monitor, memory footprint sizing, running host unit tests (`pio test -e native`), and VS Code IntelliSense index generation.
+    *   *Usage*: Compiling (`pio run -e esp32dev`), static code analysis (`pio check`), flash/monitor, memory footprint sizing, running host unit tests (`pio test -e native`), and VS Code IntelliSense index generation.
 *   **[`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md)**:
     *   *Usage*: Implementing and debugging the Apache NimBLE Central subsystem: peer tracking table, active scanning, MTU exchange, GATT characteristic discovery, CCCD notification subscription, and decoupled FreeRTOS queue handoff.
 *   **[`outbound-relay`](.agents/skills/outbound-relay/SKILL.md)**:
