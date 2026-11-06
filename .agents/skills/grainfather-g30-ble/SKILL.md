@@ -120,7 +120,7 @@ sequenceDiagram
     C1->>D: Telemetry / Status Update (Recipe Active)
 ```
 
-### 3.2. Complete Recipe Transmission Sequence
+### 3.2. Complete Recipe Transmission Sequence & Master Controller Rule
 The G30 Connect controller expects multi-line recipe parameters in strict sequence:
 1. **Line 1 (Main Header)**: `R{boil_time_min},{mash_step_count},{mash_water_l},{sparge_water_l},` (e.g. `"R60,2,14.4,9.8,    "`)
 2. **Line 2 (Configuration Flags)**: `"0,1,1,0,0,         "` (water treatment alert=0, sparge counter=1, sparge alert=1, delayed=0, skip start=0)
@@ -128,6 +128,12 @@ The G30 Connect controller expects multi-line recipe parameters in strict sequen
 4. **Line 4 (Boil Parameters)**: `"{hop_stand_min},{boil_addition_count},0,0,"` (e.g. `"0,2,0,0,           "`)
 5. **Lines 5..4+N (Boil Addition Stops)**: Time remaining in minutes with trailing comma in descending order (e.g. `"60,                "`, `"20,                "`)
 6. **Lines 4+N+1.. (Mash Steps)**: Mash temperature and duration in `{temp_c}:{duration_min}` format (e.g. `"67:60              "`, `"76:15              "`)
+
+> **Master Controller Rule**:
+> * **Do not question the recipe**: BrewLink must faithfully upload the recipe parameters without questioning or overriding them.
+> * **G30 Controller is Master**: Once the recipe sequence (`R...`) is transmitted (`auto_mode == true`), the Grainfather G30 hardware controller is the sole master of the brewing process.
+> * **Passive Monitoring & User Acknowledgements Only**: BrewLink must wait for mash setpoints to be reached, await mash step timers, wait for boil temperature to be reached, await the boil timer, and forward user acknowledgements (`T`, `I`, `A`, `V`) when prompted by the G30.
+> * **No Own Timers or Steps**: BrewLink must **never** send its own countdown timers (`S{x}`, `C`) or manual temperature steps (`$XX,`) while a recipe process is ongoing (`auto_mode == true`).
 
 ---
 
@@ -141,45 +147,45 @@ The G30 Controller pushes ASCII notification strings on characteristic `0003cdd1
 | :---: | :--- | :--- | :--- | :--- |
 | **`X`** | Temperatures | `X{TargetTemp},{CurrentTemp}` | `X65.0,64.8` | Target Setpoint: 65.0°C<br/>Current Temperature: 64.8°C |
 | **`Y`** | Hardware & Stage | `Y{Heat},{Pump},{Auto},{Ramp},{InterMode},{InterCode},{Stage},{Delayed}` | `Y1,1,0,0,0,0,1,0` | Heat: ON (1)<br/>Pump: ON (1)<br/>Auto Mode: OFF (0)<br/>Ramping: NO (0)<br/>Interaction: NONE (0)<br/>Code: 0<br/>Stage: 1 (Mash)<br/>Delayed: OFF (0) |
-| **`T`** | Timer State | `T{Active},{LeftMin},{TotalMin},{LeftSec}` | `T1,45,60,2700` | Timer Active: YES (1)<br/>Minutes Remaining: 45<br/>Total Minutes: 60<br/>Seconds Remaining: 2700 |
+| **`T`** | Timer State | `T{Active},{LeftMin},{TotalMin},{LeftSec}` | `T1,45,60,59` | Timer Active: YES (1)<br/>Ceiling Minutes Remaining: 45<br/>Total Minutes: 60<br/>Seconds in Minute: 59 (`44:59` total remaining) |
 | **`W`** | Output & Flags | `W{PwrPct},{Paused},{StepMash},{Interrupted},{ManualPwr},{SpargeAlert}` | `W100,0,1,0,0,0` | Heat Power: 100%<br/>Timer Paused: NO (0)<br/>Step Mash: YES (1)<br/>Interrupted: NO (0)<br/>Manual Mode: NO (0)<br/>Sparge Alert: NO (0) |
 | **`I`** | Interaction Prompt | `I{InteractionCode}` | `I2` | Interaction Required: Code 2 (e.g., "Add Grain / Sparge Complete") |
 | **`C`** | Boil Temperature | `C{BoilTemp}` | `C100.0` | Calibrated Boiling Point: 100.0°C |
 | **`E`** | Error Alert | `E{ErrorCode}` | `E1` | Controller Error Code: 1 |
 
-### 4.2. Interaction Codes
+### 4.2. Interaction Codes (`InterCode` in `Y` / `I{code}`)
 * `0`: Normal operation / Idle.
-* `1`: Mash prompt:
-  * Prior to heating (`heat_active == 0` and `current_temp < target_temp - 2.0C`): "Add mash water & Press SET to start heating".
-  * Once strike temperature is reached (`current_temp >= target_temp - 2.0C`): "Strike temperature reached: Add grain".
-* `2`: Mash step complete (prompt: "Sparge water alert").
-* `3`: Boil temperature reached (prompt: "Boil started / add bittering hops").
-* `4`: Boil addition alert (prompt: "Add hop / fining addition").
-* `5`: Cooling stage prompt (prompt: "Connect counterflow chiller").
+* `1`: Add mash water prompt (`"Add mash water & Press SET to start heating"`, G30 LCD: `"Add X.XL water, press set to continue"`).
+* `2`: Strike temperature reached prompt (`"Strike temperature reached: Add grain"`, G30 LCD: `"Add Grain"`).
+* `3`: Mash step complete / Sparge alert (`"Mash step finished: Sparge alert"`, G30 LCD: `"Mash finished / Sparge alert"`).
+* `4`: Sparge stage with sparge counter (`"Sparge: Add sparge water & Press SET to skip to boil"`, G30 LCD: `"SPARGE — Set to skip to boil"`).
+* `5`: Boil addition alert (`"Boil addition alert: Add timed hops/adjuncts"`).
+* `6`: Cooling stage prompt (`"Boil finished: Start cooling"`).
 
 ### 4.3. Controller Brew Phase (`Stage` in Notification `Y`)
 
-The 7th parameter in the `Y` notification represents the controller's internal brew phase ($0..7$). It must **never** be used directly as the displayed mash step number:
+The 7th parameter in the `Y` notification represents the controller's active brew stage (`1..N` for mash steps, where initial strike water fill and Add Grain occur within `Stage == 1`):
 
 | Controller Stage | Brew Phase Name | Condition / Telemetry State | Display Name |
 | :---: | :--- | :--- | :--- |
 | **0** | Idle | Controller not running a recipe | `"Idle"` |
-| **1** | Strike Water Fill & Ramp | `heat_active == 0 && current_temp < target_temp - 2.0C`<br/>`heat_active == 1 \|\| ramp_active == 1` | `"Add Strike Water"`<br/>`"Heating Strike Water"` |
-| **2** | Add Grain / Rest | Grain rest prompt or interaction code 1 with $T_{\text{cur}} \ge T_{\text{target}} - 2.0^\circ\text{C}$ | `"Add Grain"` |
-| **3** | First Mash Step | First programmed step ($3 - 2 = 1$) | `"Mash Step 1"` |
-| **4** | Second Mash Step | Second programmed step ($4 - 2 = 2$) | `"Mash Step 2"` |
-| **$2 + N$** | Mash Step $N$ | Programmed step $N$ ($stage - 2$) | `"Mash Step N"` |
-| **Sparge** | Sparge Alert | Interaction code 2 | `"Sparge"` |
-| **Boil Ramp**| Heating to Boil | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 1` | `"Heating to Boil"` |
-| **Boil** | Boiling | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 0` | `"Boiling"` |
-| **Cooling** | Counterflow Chilling | Interaction code 5 | `"Cooling"` |
+| **1** | Strike Water Fill | `InterCode == 1` or pre-heat (`!heat_active && !ramp_active && !timer.active`) | `"Add Strike Water"` |
+| **1** | Strike Water Ramp | `InterMode == 0 && ramp_active == 1 && !timer.active` | `"Heating Strike Water"` |
+| **1** | Add Grain | `InterMode == 1 && InterCode == 2` | `"Add Grain"` |
+| **1** | First Mash Step | `InterMode == 0 && ramp_active == 0` (`timer.active == 1`) | `"Mash Step 1"` |
+| **2** | Second Mash Step | Programmed mash step 2 (`Stage == 2`) | `"Mash Step 2"` |
+| **$N$** | Mash Step $N$ | Programmed mash step $N$ (`Stage == N`) | `"Mash Step N"` |
+| **Sparge** | Sparge / Skip to Boil | `InterMode == 1 && (InterCode == 3 || InterCode == 4)` | `"Sparge"` |
+| **Boil Ramp**| Heating to Boil | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and (`ramp_active == 1` or heating to setpoint) | `"Heating to Boil"` |
+| **Boil** | Boiling | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 0` (or `InterCode == 5`) | `"Boiling"` |
+| **Cooling** | Counterflow Chilling | `InterMode == 1 && InterCode == 6` | `"Cooling"` |
 
 ### 4.4. Timer Telemetry & Operational States
 
 1. **Ramping Phase**:
    When ramping to a mash step or boil setpoint, the controller sets `ramp_active = true` but keeps `timer.active = false`. The UI/telemetry must present the scheduled step duration with state `Heating to Setpoint` (`starts at temp`).
 2. **Active Countdown**:
-   Once target temperature is reached, the G30 controller beeps and initiates the countdown. The `T` notification (`T{Active},{LeftMin},{TotalMin},{LeftSec}`) provides remaining seconds (`LeftSec`) and total seconds (`TotalMin * 60`).
+   Once target temperature is reached, the G30 controller beeps and initiates the countdown. The `T` notification (`T{Active},{LeftMin},{TotalMin},{LeftSec}`) reports 1-based ceiling minutes remaining (`LeftMin`), total step minutes (`TotalMin`), and the seconds component within the minute (`LeftSec`, `0..59`, e.g., for a 2-minute step: `T1,2,2,59..0` for `01:59..01:00`, followed by `T1,1,2,59..0` for `00:59..00:00`). BrewLink computes `remaining_seconds = ((LeftMin - 1) * 60) + LeftSec` when `LeftMin > 0` and `total_seconds = TotalMin * 60`.
 3. **Paused State**:
    Timer pause is signaled via the 2nd field of the `W` notification (`W{PwrPct},{Paused},...`). Outbound command `G` toggles the pause/resume state.
 
@@ -393,16 +399,24 @@ esp_err_t g30_parse_notification(const uint8_t *data, size_t len, unified_boiler
                 state->ramp_active = (ramp == 1);
                 state->interaction.required = (inter_m == 1);
                 state->interaction.code = (uint8_t)inter_c;
-                state->stage.current_step = (uint8_t)stage;
+                state->stage.step_index = (uint8_t)stage;
+                g30_resolve_interaction_message(state, state->interaction.code);
             }
             break;
         }
         case 'T': { // T{Active},{LeftMin},{TotalMin},{LeftSec}
             int active = 0, left_min = 0, tot_min = 0, left_sec = 0;
-            if (sscanf(payload, "%d,%d,%d,%d", &active, &left_min, &tot_min, &left_sec) >= 3) {
+            int count = sscanf(payload, "%d,%d,%d,%d", &active, &left_min, &tot_min, &left_sec);
+            if (count >= 3) {
                 state->timer.active = (active == 1);
-                state->timer.remaining_seconds = (uint32_t)(left_sec > 0 ? left_sec : (left_min * 60));
                 state->timer.total_seconds = (uint32_t)(tot_min * 60);
+                if (count == 3) {
+                    state->timer.remaining_seconds = (uint32_t)(left_min * 60);
+                } else if (left_min > 0 && left_sec < 60) {
+                    state->timer.remaining_seconds = (uint32_t)(((left_min - 1) * 60) + left_sec);
+                } else {
+                    state->timer.remaining_seconds = (uint32_t)left_sec;
+                }
             }
             break;
         }

@@ -632,6 +632,6 @@ When given a recipe document to process:
    * Normalize units into destination requirements (Section 5).
    * Transform fermentation stages between flat days and ordered step objects.
 
-4. **Sanity Check Calculations:**
-   * Compute expected original gravity ($OG$) from fermentable weights and batch size.
-   * Estimate bitterness ($IBU$) using Tinseth or Rager formulas to ensure hops were not scaled incorrectly by orders of magnitude.
+4. **Do Not Question or Override the Recipe:**
+   * BrewLink must **never** question, second-guess, or override the brewer's recipe parameters (mash temperatures, durations, boil time, water volumes, or hop additions).
+   * Faithfully convert and transmit the recipe parameters to the controller; once uploaded to the Grainfather G30, the G30 hardware controller is the sole master of the brewing process.

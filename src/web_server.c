@@ -553,6 +553,9 @@ static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
         cmd.action = CMD_ACTION_DISMISS_ALERT;
         valid = true;
+    } else if (strcmp(action_str, "dismiss_sparge_alert") == 0) {
+        cmd.action = CMD_ACTION_DISMISS_SPARGE_ALERT;
+        valid = true;
     } else if (strcmp(action_str, "cancel_session") == 0) {
         cmd.action = CMD_ACTION_CANCEL_SESSION;
         valid = true;
@@ -584,6 +587,10 @@ static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
     if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Grainfather G30 is not connected");
         return ESP_FAIL;
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"status\":\"error\",\"message\":\"G30 controller is master during an active recipe; manual timers and temperature steps are disabled\"}", HTTPD_RESP_USE_STRLEN);
     } else if (err == ESP_ERR_NO_MEM) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Command queue full; please retry");
         return ESP_FAIL;
@@ -634,6 +641,7 @@ static esp_err_t api_g30_recipe_post_handler(httpd_req_t *req) {
 
     cJSON *name_item = cJSON_GetObjectItem(rec, "name");
     cJSON *boil_item = cJSON_GetObjectItem(rec, "boil_time_min");
+    cJSON *hop_stand_item = cJSON_GetObjectItem(rec, "hop_stand_min");
     cJSON *mash_w_item = cJSON_GetObjectItem(rec, "mash_water_l");
     cJSON *sparge_w_item = cJSON_GetObjectItem(rec, "sparge_water_l");
     cJSON *steps_item = cJSON_GetObjectItem(rec, "mash_steps");
@@ -649,6 +657,7 @@ static esp_err_t api_g30_recipe_post_handler(httpd_req_t *req) {
     }
 
     recipe.boil_time_min = (boil_item && cJSON_IsNumber(boil_item)) ? (uint16_t)boil_item->valueint : 60;
+    recipe.hop_stand_min = (hop_stand_item && cJSON_IsNumber(hop_stand_item) && hop_stand_item->valueint > 0) ? (uint16_t)hop_stand_item->valueint : 0;
     recipe.mash_water_l = (mash_w_item && cJSON_IsNumber(mash_w_item)) ? (float)mash_w_item->valuedouble : 16.5f;
     recipe.sparge_water_l = (sparge_w_item && cJSON_IsNumber(sparge_w_item)) ? (float)sparge_w_item->valuedouble : 14.0f;
 
