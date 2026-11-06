@@ -75,7 +75,7 @@ typedef struct {
 // FreeRTOS Queues & Core Pinning
 // =============================================================================
 #define TELEMETRY_QUEUE_LENGTH              32
-#define BLE_CMD_QUEUE_LENGTH                16
+#define BLE_CMD_QUEUE_LENGTH                32
 #define NETWORKING_TASK_CORE                0    // Core 0: BLE, WiFi, MQTT, LwIP
 #define APP_PROCESSING_TASK_CORE            1    // Core 1: Parsing, state machine, dispatch
 #define RELAY_TASK_STACK_SIZE               4096

@@ -25,6 +25,7 @@
 #include "config.h"
 #include "unified_schema.h"
 #include "grainfather_g30.h"
+#include "g30_controller.h"
 #include "config_store.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
@@ -38,6 +39,7 @@ static QueueHandle_t s_telemetry_queue = NULL;
 
 // Global FreeRTOS Queue for outbound BLE commands from WiFi/MQTT to BLE worker (Downstream)
 static QueueHandle_t s_ble_cmd_queue = NULL;
+static SemaphoreHandle_t s_g30_state_mutex = NULL;
 
 // Gateway identifier derived from ESP32 Base MAC
 static char s_gateway_id[GATEWAY_ID_MAX_LEN] = {0};
@@ -77,7 +79,7 @@ static void publish_equipment_manifest(const ble_peer_device_t *peer, bool conne
              peer->addr[0], peer->addr[1], peer->addr[2],
              peer->addr[3], peer->addr[4], peer->addr[5]);
 
-    char manifest[512];
+    char manifest[768];
     if (connected) {
         snprintf(manifest, sizeof(manifest),
                  "{\"event\":\"connected\",\"gateway_id\":\"%s\",\"mac\":\"%s\","
@@ -115,6 +117,215 @@ static void on_ble_peer_lifecycle_event(const ble_peer_device_t *peer, bool conn
              peer->device_name, connected ? "CONNECTED" : "DISCONNECTED");
 
     publish_equipment_manifest(peer, connected);
+}
+
+// -----------------------------------------------------------------------------
+// G30 Controller Public Bridge API
+// -----------------------------------------------------------------------------
+esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
+                                   bool *out_connected,
+                                   uint8_t out_mac[6],
+                                   int8_t *out_rssi) {
+    if (out_connected == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ble_peer_device_t peers[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
+    uint8_t count = 0;
+    bool found = false;
+
+    if (ble_manager_get_peers(peers, BLE_MAX_SIMULTANEOUS_CONNECTIONS, &count) == ESP_OK) {
+        for (uint8_t i = 0; i < count; i++) {
+            if (peers[i].connected && (peers[i].equipment_type == EQUIPMENT_TYPE_BOILER ||
+                strncmp(peers[i].device_name, "Grain", 5) == 0)) {
+                found = true;
+                if (out_mac != NULL) {
+                    memcpy(out_mac, peers[i].addr, 6);
+                }
+                if (out_rssi != NULL) {
+                    *out_rssi = peers[i].rssi;
+                }
+                break;
+            }
+        }
+    }
+
+    *out_connected = found;
+
+    if (out_state != NULL) {
+        if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            *out_state = s_g30_state;
+            xSemaphoreGive(s_g30_state_mutex);
+        } else {
+            *out_state = s_g30_state;
+        }
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
+    if (cmd == NULL || s_ble_cmd_queue == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool connected = false;
+    uint8_t target_mac[6] = {0};
+    int8_t rssi = 0;
+    g30_controller_get_state(NULL, &connected, target_mac, &rssi);
+    if (!connected) {
+        ESP_LOGW(TAG, "Cannot dispatch G30 command: controller not connected");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ble_outbound_cmd_packet_t outbound_pkt;
+    memset(&outbound_pkt, 0, sizeof(outbound_pkt));
+
+    bool has_mac = false;
+    for (int i = 0; i < 6; i++) {
+        if (cmd->target_mac[i] != 0) {
+            has_mac = true;
+            break;
+        }
+    }
+    if (has_mac) {
+        memcpy(outbound_pkt.mac, cmd->target_mac, 6);
+    } else {
+        memcpy(outbound_pkt.mac, target_mac, 6);
+    }
+
+    outbound_pkt.conn_handle = 0;
+    outbound_pkt.len = G30_COMMAND_LEN;
+    outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
+
+    esp_err_t enc_err = g30_encode_command(cmd, outbound_pkt.cmd_bytes);
+    if (enc_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to encode G30 command action %d: 0x%x", cmd->action, enc_err);
+        return enc_err;
+    }
+
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGE(TAG, "s_ble_cmd_queue full; command dropped");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "Enqueued G30 BLE command: '%.*s'", G30_COMMAND_LEN, outbound_pkt.cmd_bytes);
+    return ESP_OK;
+}
+
+esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
+    if (recipe == NULL || s_ble_cmd_queue == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (recipe->mash_step_count == 0 || recipe->mash_step_count > MAX_MASH_STEPS) {
+        ESP_LOGE(TAG, "Invalid mash_step_count: %u (max %u)", recipe->mash_step_count, MAX_MASH_STEPS);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (recipe->boil_addition_count > MAX_BOIL_ADDITIONS) {
+        ESP_LOGE(TAG, "Invalid boil_addition_count: %u (max %u)", recipe->boil_addition_count, MAX_BOIL_ADDITIONS);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool connected = false;
+    uint8_t target_mac[6] = {0};
+    int8_t rssi = 0;
+    g30_controller_get_state(NULL, &connected, target_mac, &rssi);
+    if (!connected) {
+        ESP_LOGW(TAG, "Cannot dispatch recipe: G30 controller not connected");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Update local state immediately so web status reflects recipe start prompt
+    if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_g30_state.auto_mode = true;
+        s_g30_state.stage.step_index = 1;
+        s_g30_state.heat_active = false;
+        s_g30_state.ramp_active = false;
+        if (recipe->mash_step_count > 0) {
+            s_g30_state.target_temp_c = recipe->mash_steps[0].temp_c;
+        }
+        s_g30_state.interaction.required = true;
+        if (recipe->mash_water_l > 0.0f) {
+            snprintf(s_g30_state.interaction.message, sizeof(s_g30_state.interaction.message),
+                     "Add %.1fL water & Press SET to start heating", recipe->mash_water_l);
+        } else {
+            strncpy(s_g30_state.interaction.message, "Add mash water & Press SET to start heating",
+                    sizeof(s_g30_state.interaction.message) - 1);
+        }
+        s_g30_state.interaction.message[sizeof(s_g30_state.interaction.message) - 1] = '\0';
+        strncpy(s_g30_state.stage.step_name, "Add Strike Water", sizeof(s_g30_state.stage.step_name) - 1);
+        s_g30_state.stage.step_name[sizeof(s_g30_state.stage.step_name) - 1] = '\0';
+        xSemaphoreGive(s_g30_state_mutex);
+    }
+
+    ble_outbound_cmd_packet_t outbound_pkt;
+    memset(&outbound_pkt, 0, sizeof(outbound_pkt));
+    memcpy(outbound_pkt.mac, target_mac, 6);
+    outbound_pkt.conn_handle = 0;
+    outbound_pkt.len = G30_COMMAND_LEN;
+    outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
+
+    // Line 1: Main Recipe Header (R{boil_min},{mash_steps},{mash_water},{sparge_water},)
+    esp_err_t err = g30_encode_recipe_header(recipe, outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 2: Recipe Configuration Flags (0,1,1,0,0,)
+    err = g30_encode_recipe_flags(outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 3: Recipe Name (sanitized uppercase ASCII, space padded)
+    err = g30_encode_recipe_name(recipe->name, outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 4: Boil Parameters ({hop_stand_min},{boil_addition_count},0,0,)
+    err = g30_encode_recipe_boil_params(0, recipe->boil_addition_count, outbound_pkt.cmd_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Line 5..4+N: Boil Stops in descending order ({time_left_min},)
+    for (int i = 0; i < recipe->boil_addition_count; i++) {
+        err = g30_encode_recipe_boil_stop(recipe->boil_additions_min[i], outbound_pkt.cmd_bytes);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    // Line 4+N+1..: Mash Steps in sequence ({temp_c}:{duration_min})
+    for (int i = 0; i < recipe->mash_step_count; i++) {
+        err = g30_encode_recipe_mash_step(&recipe->mash_steps[i], outbound_pkt.cmd_bytes);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    ESP_LOGI(TAG, "Enqueued complete recipe transfer for '%s' (%u steps, %u additions)",
+             recipe->name, recipe->mash_step_count, recipe->boil_addition_count);
+    return ESP_OK;
 }
 
 // -----------------------------------------------------------------------------
@@ -217,6 +428,9 @@ static void process_inbound_command(const char *topic, const char *payload, int 
     } else if (strcmp(action_str, "ack_interaction") == 0) {
         cmd.action = CMD_ACTION_ACK_INTERACTION;
         handled = true;
+    } else if (strcmp(action_str, "press_set") == 0) {
+        cmd.action = CMD_ACTION_PRESS_SET;
+        handled = true;
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
         cmd.action = CMD_ACTION_DISMISS_ALERT;
         handled = true;
@@ -277,56 +491,22 @@ static void process_inbound_command(const char *topic, const char *payload, int 
         return;
     }
 
-    // Dispatch to FreeRTOS queue for BLE worker
-    ble_outbound_cmd_packet_t outbound_pkt;
-    memset(&outbound_pkt, 0, sizeof(outbound_pkt));
-    if (mac_resolved) {
-        memcpy(outbound_pkt.mac, target_mac, 6);
-    }
-    outbound_pkt.conn_handle = 0;
-    outbound_pkt.len = G30_COMMAND_LEN;
-    outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
-
+    // Dispatch via unified G30 controller bridge
     if (is_recipe) {
-        // Enqueue recipe header
-        esp_err_t err = g30_encode_recipe_header(&cmd.params.recipe, outbound_pkt.cmd_bytes);
-        if (err == ESP_OK) {
-            xQueueSend(s_ble_cmd_queue, &outbound_pkt, 0);
-        }
-
-        // Enqueue mash steps
-        for (int i = 0; i < cmd.params.recipe.mash_step_count; i++) {
-            err = g30_encode_recipe_mash_step(&cmd.params.recipe.mash_steps[i], outbound_pkt.cmd_bytes);
-            if (err == ESP_OK) {
-                xQueueSend(s_ble_cmd_queue, &outbound_pkt, 0);
-            }
-        }
-
-        // Enqueue boil stops
-        for (int i = 0; i < cmd.params.recipe.boil_addition_count; i++) {
-            err = g30_encode_recipe_boil_stop(cmd.params.recipe.boil_additions_min[i], outbound_pkt.cmd_bytes);
-            if (err == ESP_OK) {
-                xQueueSend(s_ble_cmd_queue, &outbound_pkt, 0);
-            }
-        }
-
+        esp_err_t err = g30_controller_dispatch_recipe(&cmd.params.recipe);
         uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
-        mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "success", 0, duration_ms);
-        ESP_LOGI(TAG, "Enqueued complete recipe transfer for '%s'", cmd.params.recipe.name);
-    } else {
-        esp_err_t enc_err = g30_encode_command(&cmd, outbound_pkt.cmd_bytes);
-        if (enc_err == ESP_OK) {
-            if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, 0) == pdTRUE) {
-                uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
-                mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "success", 0, duration_ms);
-                ESP_LOGI(TAG, "Enqueued G30 BLE command: '%.*s'", G30_COMMAND_LEN, outbound_pkt.cmd_bytes);
-            } else {
-                ESP_LOGE(TAG, "s_ble_cmd_queue full; command dropped");
-                mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "error", 503, 0);
-            }
+        if (err == ESP_OK) {
+            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "success", 0, duration_ms);
         } else {
-            ESP_LOGE(TAG, "Failed to encode G30 command: err=0x%x", enc_err);
-            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "error", enc_err, 0);
+            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "error", (int)err, 0);
+        }
+    } else {
+        esp_err_t err = g30_controller_dispatch_command(&cmd);
+        uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
+        if (err == ESP_OK) {
+            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "success", 0, duration_ms);
+        } else {
+            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "error", (int)err, 0);
         }
     }
 }
@@ -366,7 +546,7 @@ static void on_mqtt_connection_status_change(bool connected) {
                          peers[i].addr[0], peers[i].addr[1], peers[i].addr[2],
                          peers[i].addr[3], peers[i].addr[4], peers[i].addr[5]);
 
-                char snapshot_json[512];
+                char snapshot_json[768];
                 snprintf(snapshot_json, sizeof(snapshot_json),
                          "{\"mac\":\"%s\",\"equipment_type\":\"boiler\",\"model\":\"%s\","
                          "\"rssi\":%d,\"state\":{"
@@ -421,7 +601,7 @@ static void on_wifi_sta_status_change(bool connected, const char *ip) {
 // -----------------------------------------------------------------------------
 static void telemetry_relay_task(void *pvParameters) {
     ble_telemetry_packet_t packet;
-    char payload_json[512];
+    char payload_json[768];
 
     ESP_LOGI(TAG, "Telemetry relay task active on core %d", xPortGetCoreID());
 
@@ -438,7 +618,13 @@ static void telemetry_relay_task(void *pvParameters) {
 
             // Parse notification using Grainfather G30 protocol
             g30_notification_type_t notif_type = G30_NOTIF_UNKNOWN;
-            esp_err_t err = g30_parse_notification(packet.data, packet.len, &s_g30_state, &notif_type);
+            esp_err_t err = ESP_FAIL;
+            if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                err = g30_parse_notification(packet.data, packet.len, &s_g30_state, &notif_type);
+                xSemaphoreGive(s_g30_state_mutex);
+            } else {
+                err = g30_parse_notification(packet.data, packet.len, &s_g30_state, &notif_type);
+            }
 
             char mac_str[13];
             snprintf(mac_str, sizeof(mac_str), "%02X%02X%02X%02X%02X%02X",
@@ -555,6 +741,13 @@ void app_main(void) {
     s_ble_cmd_queue = xQueueCreate(BLE_CMD_QUEUE_LENGTH, sizeof(ble_outbound_cmd_packet_t));
     if (s_ble_cmd_queue == NULL) {
         ESP_LOGE(TAG, "Failed to allocate s_ble_cmd_queue");
+        return;
+    }
+
+    // 4b. Create G30 State Mutex
+    s_g30_state_mutex = xSemaphoreCreateMutex();
+    if (s_g30_state_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create s_g30_state_mutex");
         return;
     }
 

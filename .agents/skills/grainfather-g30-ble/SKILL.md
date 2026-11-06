@@ -75,47 +75,59 @@ Transferring an automated brew recipe from the Gateway / Dashboard to the G30 re
 ```mermaid
 sequenceDiagram
     autonumber
-    participant D as Dashboard / WiFi (MQTT)
+    participant D as Dashboard / WiFi (MQTT / Web)
     participant C1 as Gateway Core 1 (Relay & Parser)
     participant C0 as Gateway Core 0 (NimBLE Client)
     participant G30 as Grainfather G30 Controller
 
-    D->>C1: MQTT: brewlink/device/{mac}/cmd (load_recipe JSON)
+    D->>C1: Web / MQTT: Recipe transfer payload
     C1->>C1: Validate recipe & decompose into 19-char G30 packets
     
-    C1->>C0: Push Header Packet ("R75,2,16.5,14.0,  ") via s_ble_cmd_queue
-    C0->>G30: GATT Write: Header (Boil: 75m, Steps: 2, Mash: 16.5L, Sparge: 14.0L)
+    C1->>C0: Line 1: Header Packet ("R60,2,14.4,9.8,    ")
+    C0->>G30: GATT Write: Header (Boil: 60m, Steps: 2, Mash: 14.4L, Sparge: 9.8L)
+    Note over C0,G30: Delay 150ms
+
+    C1->>C0: Line 2: Flags ("0,1,1,0,0,         ")
+    C0->>G30: GATT Write: Config Flags (water_treat=0, sparge_cnt=1, sparge_alert=1)
+    Note over C0,G30: Delay 150ms
+
+    C1->>C0: Line 3: Name ("NEWCASTLE BROWN ALE")
+    C0->>G30: GATT Write: Recipe Name Display
+    Note over C0,G30: Delay 150ms
+
+    C1->>C0: Line 4: Boil Params ("0,2,0,0,           ")
+    C0->>G30: GATT Write: Boil Params (hop_stand=0, boil_additions=2, boil_pwr=0)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Boil Stop 1 ("60                 ")
-    C0->>G30: GATT Write: Boil Addition Stop 1 (60 mins remaining)
+    C1->>C0: Line 5: Boil Stop 1 ("60,                ")
+    C0->>G30: GATT Write: Boil Addition 1 (60 mins remaining)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Boil Stop 2 ("15                 ")
-    C0->>G30: GATT Write: Boil Addition Stop 2 (15 mins remaining)
+    C1->>C0: Line 6: Boil Stop 2 ("20,                ")
+    C0->>G30: GATT Write: Boil Addition 2 (20 mins remaining)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Mash Step 1 ("65:60              ")
-    C0->>G30: GATT Write: Mash Step 1 (65°C for 60 minutes)
+    C1->>C0: Line 7: Mash Step 1 ("67:60              ")
+    C0->>G30: GATT Write: Mash Step 1 (67°C for 60 minutes)
     Note over C0,G30: Delay 150ms
     
-    C1->>C0: Push Mash Step 2 ("75:10              ")
-    C0->>G30: GATT Write: Mash Step 2 (75°C for 10 minutes)
+    C1->>C0: Line 8: Mash Step 2 ("76:15              ")
+    C0->>G30: GATT Write: Mash Step 2 (76°C for 15 minutes)
     Note over C0,G30: Delay 150ms
 
     G30-->>C0: GATT Notification: "Y..." (Auto Mode Active)
     C0->>C1: Push Telemetry Packet
-    C1->>D: MQTT: brewlink/device/{mac}/telemetry (Recipe Active)
+    C1->>D: Telemetry / Status Update (Recipe Active)
 ```
 
-### 3.2. Recipe Header Syntax
-The recipe header initiates recipe programming:
-```text
-R{boil_time_min},{mash_step_count},{mash_water_l},{sparge_water_l},
-```
-* Example: `R75,2,16.5,14.0,` -> Padded with spaces to 19 chars: `"R75,2,16.5,14.0,  "`
-* Followed by boil stop times in descending order (e.g. `"60                 "`, `"15                 "`).
-* Followed by mash steps in `{temperature_c}:{duration_min}` format (e.g. `"65:60              "`).
+### 3.2. Complete Recipe Transmission Sequence
+The G30 Connect controller expects multi-line recipe parameters in strict sequence:
+1. **Line 1 (Main Header)**: `R{boil_time_min},{mash_step_count},{mash_water_l},{sparge_water_l},` (e.g. `"R60,2,14.4,9.8,    "`)
+2. **Line 2 (Configuration Flags)**: `"0,1,1,0,0,         "` (water treatment alert=0, sparge counter=1, sparge alert=1, delayed=0, skip start=0)
+3. **Line 3 (Recipe Name)**: Uppercase alphanumeric name, truncated to 19 characters, space padded (e.g. `"NEWCASTLE BROWN ALE"`)
+4. **Line 4 (Boil Parameters)**: `"{hop_stand_min},{boil_addition_count},0,0,"` (e.g. `"0,2,0,0,           "`)
+5. **Lines 5..4+N (Boil Addition Stops)**: Time remaining in minutes with trailing comma in descending order (e.g. `"60,                "`, `"20,                "`)
+6. **Lines 4+N+1.. (Mash Steps)**: Mash temperature and duration in `{temp_c}:{duration_min}` format (e.g. `"67:60              "`, `"76:15              "`)
 
 ---
 
@@ -137,11 +149,39 @@ The G30 Controller pushes ASCII notification strings on characteristic `0003cdd1
 
 ### 4.2. Interaction Codes
 * `0`: Normal operation / Idle.
-* `1`: Heat strike water ready (prompt: "Add grain").
+* `1`: Mash prompt:
+  * Prior to heating (`heat_active == 0` and `current_temp < target_temp - 2.0C`): "Add mash water & Press SET to start heating".
+  * Once strike temperature is reached (`current_temp >= target_temp - 2.0C`): "Strike temperature reached: Add grain".
 * `2`: Mash step complete (prompt: "Sparge water alert").
 * `3`: Boil temperature reached (prompt: "Boil started / add bittering hops").
 * `4`: Boil addition alert (prompt: "Add hop / fining addition").
 * `5`: Cooling stage prompt (prompt: "Connect counterflow chiller").
+
+### 4.3. Controller Brew Phase (`Stage` in Notification `Y`)
+
+The 7th parameter in the `Y` notification represents the controller's internal brew phase ($0..7$). It must **never** be used directly as the displayed mash step number:
+
+| Controller Stage | Brew Phase Name | Condition / Telemetry State | Display Name |
+| :---: | :--- | :--- | :--- |
+| **0** | Idle | Controller not running a recipe | `"Idle"` |
+| **1** | Strike Water Fill & Ramp | `heat_active == 0 && current_temp < target_temp - 2.0C`<br/>`heat_active == 1 \|\| ramp_active == 1` | `"Add Strike Water"`<br/>`"Heating Strike Water"` |
+| **2** | Add Grain / Rest | Grain rest prompt or interaction code 1 with $T_{\text{cur}} \ge T_{\text{target}} - 2.0^\circ\text{C}$ | `"Add Grain"` |
+| **3** | First Mash Step | First programmed step ($3 - 2 = 1$) | `"Mash Step 1"` |
+| **4** | Second Mash Step | Second programmed step ($4 - 2 = 2$) | `"Mash Step 2"` |
+| **$2 + N$** | Mash Step $N$ | Programmed step $N$ ($stage - 2$) | `"Mash Step N"` |
+| **Sparge** | Sparge Alert | Interaction code 2 | `"Sparge"` |
+| **Boil Ramp**| Heating to Boil | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 1` | `"Heating to Boil"` |
+| **Boil** | Boiling | $T_{\text{target}} \ge 98.0^\circ\text{C}$ and `ramp_active == 0` | `"Boiling"` |
+| **Cooling** | Counterflow Chilling | Interaction code 5 | `"Cooling"` |
+
+### 4.4. Timer Telemetry & Operational States
+
+1. **Ramping Phase**:
+   When ramping to a mash step or boil setpoint, the controller sets `ramp_active = true` but keeps `timer.active = false`. The UI/telemetry must present the scheduled step duration with state `Heating to Setpoint` (`starts at temp`).
+2. **Active Countdown**:
+   Once target temperature is reached, the G30 controller beeps and initiates the countdown. The `T` notification (`T{Active},{LeftMin},{TotalMin},{LeftSec}`) provides remaining seconds (`LeftSec`) and total seconds (`TotalMin * 60`).
+3. **Paused State**:
+   Timer pause is signaled via the 2nd field of the `W` notification (`W{PwrPct},{Paused},...`). Outbound command `G` toggles the pause/resume state.
 
 ---
 
@@ -252,7 +292,9 @@ Available `action` verbs:
 * `"resume_timer"`: `{}`
 * `"cancel_timer"`: `{}`
 * `"ack_interaction"`: `{}`
+* `"press_set"`: `{}`
 * `"dismiss_alert"`: `{}`
+* `"cancel_session"`: `{}`
 * `"load_recipe"`:
   ```json
   {

@@ -157,15 +157,30 @@ void test_g30_parse_interaction_notification(void) {
     unified_boiler_state_t state;
     memset(&state, 0, sizeof(state));
 
-    const uint8_t notif_data[] = "I1";
+    // When water is cold (e.g. 23C vs 67C target), I1 is the initial prompt
+    state.target_temp_c = 67.0f;
+    state.current_temp_c = 23.0f;
+    const uint8_t notif_cold[] = "I1";
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
-    esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
+    esp_err_t err = g30_parse_notification(notif_cold, strlen((char*)notif_cold), &state, &type);
     TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_INT(G30_NOTIF_INTERACTION, type);
     TEST_ASSERT_TRUE(state.interaction.required);
     TEST_ASSERT_EQUAL_UINT8(1, state.interaction.code);
+    TEST_ASSERT_EQUAL_STRING("Add mash water & Press SET to start heating", state.interaction.message);
+
+    // When water is heated to strike temperature (67C), I1 prompts to add grain
+    state.current_temp_c = 67.0f;
+    err = g30_parse_notification(notif_cold, strlen((char*)notif_cold), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
     TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
+
+    // Other interaction code (e.g. I2)
+    const uint8_t notif_sparge[] = "I2";
+    err = g30_parse_notification(notif_sparge, strlen((char*)notif_sparge), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash step finished: Sparge alert", state.interaction.message);
 }
 
 void test_g30_parse_boil_temp_notification(void) {
@@ -285,21 +300,36 @@ void test_g30_encode_recipe_commands(void) {
     recipe.mash_water_l = 16.5f;
     recipe.sparge_water_l = 14.0f;
 
-    // Header -> "R75,2,16.5,14.0,  " (19 bytes)
+    // Line 1: Header -> "R75,2,16.5,14.0,   " (19 bytes)
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_header(&recipe, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("R75,2,16.5,14.0,  ", buf);
+    TEST_ASSERT_EQUAL_STRING("R75,2,16.5,14.0,   ", buf);
+
+    // Line 2: Recipe Flags -> "0,1,1,0,0,         "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_flags(buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("0,1,1,0,0,         ", buf);
+
+    // Line 3: Recipe Name -> "SAISON             "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_name("Saison", buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("SAISON             ", buf);
+
+    // Line 4: Boil Params -> "0,2,0,0,           "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_params(0, 2, buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("0,2,0,0,           ", buf);
+
+    // Line 5: Boil stop at 15 min remaining -> "15,                "
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(15, buf));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
+    TEST_ASSERT_EQUAL_STRING("15,                ", buf);
 
     // Mash Step 1: 65C for 60 min -> "65:60              "
     unified_mash_step_t step1 = {.temp_c = 65.0f, .duration_min = 60};
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&step1, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
     TEST_ASSERT_EQUAL_STRING("65:60              ", buf);
-
-    // Boil stop at 15 min remaining -> "15                 "
-    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(15, buf));
-    TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
-    TEST_ASSERT_EQUAL_STRING("15                 ", buf);
 }
 
 // =============================================================================
@@ -451,6 +481,242 @@ void test_compatibility_full_advertisement_check(void) {
 }
 
 // =============================================================================
+// G30 Web Controller & Recipe Conversion Validation Tests
+// =============================================================================
+void test_g30_web_recipe_conversion_and_encoding(void) {
+    unified_recipe_t recipe;
+    memset(&recipe, 0, sizeof(recipe));
+    strncpy(recipe.name, "Newcastle Brown Ale", sizeof(recipe.name) - 1);
+    recipe.boil_time_min = 60;
+    recipe.mash_water_l = 14.4f;
+    recipe.sparge_water_l = 9.8f;
+    recipe.mash_step_count = 2;
+    recipe.mash_steps[0].temp_c = 67.0f;
+    recipe.mash_steps[0].duration_min = 60;
+    recipe.mash_steps[1].temp_c = 76.0f;
+    recipe.mash_steps[1].duration_min = 15;
+    recipe.boil_addition_count = 2;
+    recipe.boil_additions_min[0] = 60;
+    recipe.boil_additions_min[1] = 20;
+
+    char header[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_header(&recipe, header));
+    TEST_ASSERT_EQUAL_UINT32(19, strlen(header));
+    TEST_ASSERT_EQUAL_STRING("R60,2,14.4,9.8,    ", header);
+
+    char flags[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_flags(flags));
+    TEST_ASSERT_EQUAL_STRING("0,1,1,0,0,         ", flags);
+
+    char name[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_name(recipe.name, name));
+    TEST_ASSERT_EQUAL_STRING("NEWCASTLE BROWN ALE", name);
+
+    char boil_params[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_params(0, recipe.boil_addition_count, boil_params));
+    TEST_ASSERT_EQUAL_STRING("0,2,0,0,           ", boil_params);
+
+    char boil1[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(recipe.boil_additions_min[0], boil1));
+    TEST_ASSERT_EQUAL_STRING("60,                ", boil1);
+
+    char boil2[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_boil_stop(recipe.boil_additions_min[1], boil2));
+    TEST_ASSERT_EQUAL_STRING("20,                ", boil2);
+
+    char step1[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[0], step1));
+    TEST_ASSERT_EQUAL_STRING("67:60              ", step1);
+
+    char step2[G30_COMMAND_LEN + 1];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&recipe.mash_steps[1], step2));
+    TEST_ASSERT_EQUAL_STRING("76:15              ", step2);
+}
+
+void test_g30_web_control_actions_mapping(void) {
+    char buf[G30_COMMAND_LEN + 1];
+    unified_command_t cmd;
+
+    // Pump control
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_PUMP;
+    cmd.params.pump_state = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("L1                 ", buf);
+
+    cmd.params.pump_state = false;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("L0                 ", buf);
+
+    // Heat control
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_HEAT;
+    cmd.params.heat.heat_state = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("K1                 ", buf);
+
+    cmd.params.heat.heat_state = false;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("K0                 ", buf);
+
+    // Set target temp decimal & integer
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_TARGET_TEMP;
+    cmd.params.target_temp_c = 65.5f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("$65.5,             ", buf);
+
+    cmd.params.target_temp_c = 100.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("$100,              ", buf);
+
+    // Acknowledge interaction prompt
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_ACK_INTERACTION;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("I                  ", buf);
+
+    // Press SET command
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_PRESS_SET;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("T                  ", buf);
+
+    // Pause/Resume timer command
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_PAUSE_TIMER;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("G                  ", buf);
+
+    // Cancel timer command
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_CANCEL_TIMER;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("C                  ", buf);
+}
+
+void test_g30_parse_initial_strike_water_prompt(void) {
+    unified_boiler_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.target_temp_c = 67.0f;
+    state.current_temp_c = 23.0f;
+    state.heat_active = false;
+    state.stage.step_index = 1;
+
+    // Y notification received at session start with inter_m=0, inter_c=0: Y0,0,1,0,0,0,1,0
+    const uint8_t notif_data[] = "Y0,0,1,0,0,0,1,0";
+    g30_notification_type_t type = G30_NOTIF_UNKNOWN;
+
+    esp_err_t err = g30_parse_notification(notif_data, strlen((char*)notif_data), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_TRUE(state.interaction.required);
+    TEST_ASSERT_EQUAL_STRING("Add mash water & Press SET to start heating", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Add Strike Water", state.stage.step_name);
+
+    // When temperature heats up to 67C and G30 alarms to add grain (inter_m=1, inter_c=1):
+    const uint8_t temp_notif[] = "X67.0,67.0";
+    err = g30_parse_notification(temp_notif, strlen((char*)temp_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+
+    const uint8_t strike_alert[] = "Y1,1,1,0,1,1,1,0";
+    err = g30_parse_notification(strike_alert, strlen((char*)strike_alert), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_TRUE(state.interaction.required);
+    TEST_ASSERT_EQUAL_STRING("Strike temperature reached: Add grain", state.interaction.message);
+    TEST_ASSERT_EQUAL_STRING("Add Grain", state.stage.step_name);
+}
+
+void test_g30_stage_name_mapping(void) {
+    unified_boiler_state_t state;
+    memset(&state, 0, sizeof(state));
+    g30_notification_type_t type = G30_NOTIF_UNKNOWN;
+
+    // Stage 0 -> Idle
+    const uint8_t idle_notif[] = "Y0,0,1,0,0,0,0,0";
+    esp_err_t err = g30_parse_notification(idle_notif, strlen((char*)idle_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Idle", state.stage.step_name);
+
+    // Stage 1 with cold water and no heat -> Add Strike Water
+    state.target_temp_c = 67.0f;
+    state.current_temp_c = 20.0f;
+    const uint8_t strike_water_notif[] = "Y0,0,1,0,0,0,1,0";
+    err = g30_parse_notification(strike_water_notif, strlen((char*)strike_water_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Add Strike Water", state.stage.step_name);
+
+    // Stage 1 with heat or ramp active -> Heating Strike Water
+    const uint8_t heat_strike_notif[] = "Y1,0,1,1,0,0,1,0";
+    err = g30_parse_notification(heat_strike_notif, strlen((char*)heat_strike_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Heating Strike Water", state.stage.step_name);
+
+    // Stage 2 -> Add Grain
+    const uint8_t add_grain_notif[] = "Y1,0,1,0,0,0,2,0";
+    err = g30_parse_notification(add_grain_notif, strlen((char*)add_grain_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Add Grain", state.stage.step_name);
+
+    // Stage 3 -> Mash Step 1 (stage 3 - 2 = 1)
+    state.target_temp_c = 65.0f;
+    state.current_temp_c = 65.0f;
+    const uint8_t mash1_notif[] = "Y1,1,1,0,0,0,3,0";
+    err = g30_parse_notification(mash1_notif, strlen((char*)mash1_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash Step 1", state.stage.step_name);
+
+    // Stage 4 -> Mash Step 2 (stage 4 - 2 = 2)
+    state.target_temp_c = 72.0f;
+    state.current_temp_c = 72.0f;
+    const uint8_t mash2_notif[] = "Y1,1,1,0,0,0,4,0";
+    err = g30_parse_notification(mash2_notif, strlen((char*)mash2_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash Step 2", state.stage.step_name);
+
+    // Stage 5 with mash temp -> Mash Step 3 (stage 5 - 2 = 3)
+    state.target_temp_c = 78.0f;
+    state.current_temp_c = 78.0f;
+    const uint8_t mash3_notif[] = "Y1,1,1,0,0,0,5,0";
+    err = g30_parse_notification(mash3_notif, strlen((char*)mash3_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Mash Step 3", state.stage.step_name);
+
+    // Sparge Alert (inter_c = 2) -> Sparge
+    const uint8_t sparge_notif[] = "Y0,0,1,0,1,2,5,0";
+    err = g30_parse_notification(sparge_notif, strlen((char*)sparge_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Sparge", state.stage.step_name);
+
+    // Boil heating / ramp (target 100C, ramp active) -> Heating to Boil
+    state.target_temp_c = 100.0f;
+    state.current_temp_c = 85.0f;
+    state.boil_temp_c = 100.0f;
+    const uint8_t boil_ramp_notif[] = "Y1,0,1,1,0,0,6,0";
+    err = g30_parse_notification(boil_ramp_notif, strlen((char*)boil_ramp_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Heating to Boil", state.stage.step_name);
+
+    // Boil active (target 100C, ramp inactive) -> Boiling
+    state.current_temp_c = 100.0f;
+    const uint8_t boil_active_notif[] = "Y1,0,1,0,0,0,6,0";
+    err = g30_parse_notification(boil_active_notif, strlen((char*)boil_active_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Boiling", state.stage.step_name);
+
+    // Cooling alert (inter_c = 5) -> Cooling
+    const uint8_t cooling_notif[] = "Y0,0,1,0,1,5,7,0";
+    err = g30_parse_notification(cooling_notif, strlen((char*)cooling_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Cooling", state.stage.step_name);
+
+    // Manual mode -> Manual Mode
+    const uint8_t manual_notif[] = "Y1,1,0,0,0,0,0,0";
+    err = g30_parse_notification(manual_notif, strlen((char*)manual_notif), &state, &type);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("Manual Mode", state.stage.step_name);
+}
+
+// =============================================================================
 // Test Runner Entrypoint
 // =============================================================================
 int main(int argc, char **argv) {
@@ -490,6 +756,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compatibility_rejects_non_g30_equipment);
     RUN_TEST(test_compatibility_rejects_incompatible_devices);
     RUN_TEST(test_compatibility_full_advertisement_check);
+
+    // G30 Web Controller & Recipe tests
+    RUN_TEST(test_g30_web_recipe_conversion_and_encoding);
+    RUN_TEST(test_g30_web_control_actions_mapping);
+    RUN_TEST(test_g30_parse_initial_strike_water_prompt);
+    RUN_TEST(test_g30_stage_name_mapping);
 
     return UNITY_END();
 }

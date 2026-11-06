@@ -36,8 +36,90 @@ const char* g30_get_interaction_message(uint8_t code) {
     }
 }
 
-// =============================================================================
-// Format Fixed 19-Character Command Buffer
+// Resolve contextual interaction message taking into account temperature and heating status
+static void g30_resolve_interaction_message(unified_boiler_state_t *state, uint8_t code) {
+    if (state == NULL) {
+        return;
+    }
+
+    // Determine if strike temperature has actually been reached
+    bool temp_reached = (state->target_temp_c > 0.0f &&
+                         state->current_temp_c >= (state->target_temp_c - 2.0f));
+
+    // Initial cold water / strike water fill step (prior to heating)
+    bool is_initial_strike_step = (state->auto_mode && state->stage.step_index <= 1 &&
+                                   !state->heat_active && !temp_reached);
+
+    if (code == 1 || is_initial_strike_step) {
+        if (!temp_reached) {
+            // Cold water -> Initial prompt: Add strike water & Press SET
+            state->interaction.required = true;
+            state->interaction.code = 1;
+            if (strncmp(state->interaction.message, "Add ", 4) != 0) {
+                strncpy(state->interaction.message, "Add mash water & Press SET to start heating",
+                        sizeof(state->interaction.message) - 1);
+                state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+            }
+            strncpy(state->stage.step_name, "Add Strike Water", sizeof(state->stage.step_name) - 1);
+            state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+            return;
+        } else {
+            // Strike temperature reached -> Prompt to add grain
+            state->interaction.required = true;
+            state->interaction.code = 1;
+            strncpy(state->interaction.message, "Strike temperature reached: Add grain",
+                    sizeof(state->interaction.message) - 1);
+            state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+            strncpy(state->stage.step_name, "Add Grain", sizeof(state->stage.step_name) - 1);
+            state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+            return;
+        }
+    }
+
+    // Populate stage step name for other steps
+    if (state->auto_mode) {
+        if (state->stage.step_index == 0) {
+            strncpy(state->stage.step_name, "Idle", sizeof(state->stage.step_name) - 1);
+        } else if (state->stage.step_index == 1) {
+            if (state->ramp_active || state->heat_active) {
+                strncpy(state->stage.step_name, "Heating Strike Water", sizeof(state->stage.step_name) - 1);
+            } else {
+                strncpy(state->stage.step_name, "Add Strike Water", sizeof(state->stage.step_name) - 1);
+            }
+        } else if (state->stage.step_index == 2) {
+            strncpy(state->stage.step_name, "Add Grain", sizeof(state->stage.step_name) - 1);
+        } else if (code == 2) {
+            strncpy(state->stage.step_name, "Sparge", sizeof(state->stage.step_name) - 1);
+        } else if (code == 5) {
+            strncpy(state->stage.step_name, "Cooling", sizeof(state->stage.step_name) - 1);
+        } else if ((state->boil_temp_c > 0.0f && state->target_temp_c >= (state->boil_temp_c - 1.5f)) ||
+                   (state->target_temp_c >= 98.0f)) {
+            if (state->ramp_active) {
+                strncpy(state->stage.step_name, "Heating to Boil", sizeof(state->stage.step_name) - 1);
+            } else {
+                strncpy(state->stage.step_name, "Boiling", sizeof(state->stage.step_name) - 1);
+            }
+        } else {
+            // In G30 auto recipe mode, stages 3+ correspond to mash steps (stage 3 = step 1, stage 4 = step 2, etc.)
+            uint8_t mash_step = (state->stage.step_index >= 2) ? (state->stage.step_index - 2) : 1;
+            snprintf(state->stage.step_name, sizeof(state->stage.step_name), "Mash Step %u", mash_step);
+        }
+        state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+    } else {
+        strncpy(state->stage.step_name, "Manual Mode", sizeof(state->stage.step_name) - 1);
+        state->stage.step_name[sizeof(state->stage.step_name) - 1] = '\0';
+    }
+
+    if (!state->interaction.required) {
+        strncpy(state->interaction.message, "Normal operation", sizeof(state->interaction.message) - 1);
+        state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+        return;
+    }
+
+    strncpy(state->interaction.message, g30_get_interaction_message(code),
+            sizeof(state->interaction.message) - 1);
+    state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+}
 // =============================================================================
 esp_err_t g30_format_padded_cmd(const char *cmd_str, char out_buf[G30_COMMAND_LEN + 1]) {
     if (cmd_str == NULL || out_buf == NULL) {
@@ -109,6 +191,10 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
             snprintf(raw_cmd, sizeof(raw_cmd), "A");
             break;
 
+        case CMD_ACTION_PRESS_SET:
+            snprintf(raw_cmd, sizeof(raw_cmd), "T");
+            break;
+
         case CMD_ACTION_CANCEL_SESSION:
             snprintf(raw_cmd, sizeof(raw_cmd), "Q1");
             break;
@@ -123,13 +209,14 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
 // =============================================================================
 // Recipe Command Encoders
 // =============================================================================
+
+// Line 1: Main Header: R{boil_min},{step_count},{mash_water},{sparge_water},
 esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]) {
     if (recipe == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
     char raw_cmd[G30_COMMAND_LEN + 1];
-    // Layout: R{boil_min},{step_count},{mash_water},{sparge_water},
     snprintf(raw_cmd, sizeof(raw_cmd), "R%u,%u,%.1f,%.1f,",
              recipe->boil_time_min,
              recipe->mash_step_count,
@@ -139,6 +226,70 @@ esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[
     return g30_format_padded_cmd(raw_cmd, out_buf);
 }
 
+// Line 2: Recipe Flags: 0,1,1,0,0,
+// (water_treat=0, sparge_counter=1, sparge_alert=1, delayed=0, skip_start=0)
+esp_err_t g30_encode_recipe_flags(char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return g30_format_padded_cmd("0,1,1,0,0,", out_buf);
+}
+
+// Line 3: Recipe Name (sanitized uppercase ASCII, truncated to 19 characters, space padded)
+esp_err_t g30_encode_recipe_name(const char *name, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char clean_name[G30_COMMAND_LEN + 1];
+    memset(clean_name, 0, sizeof(clean_name));
+
+    if (name != NULL && name[0] != '\0') {
+        int dst_idx = 0;
+        for (int i = 0; dst_idx < G30_COMMAND_LEN && name[i] != '\0'; i++) {
+            char c = name[i];
+            if (c >= 'a' && c <= 'z') {
+                c = (char)(c - 'a' + 'A');
+            }
+            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_') {
+                clean_name[dst_idx++] = c;
+            }
+        }
+        clean_name[dst_idx] = '\0';
+    }
+
+    if (clean_name[0] == '\0') {
+        strncpy(clean_name, "BREW RECIPE", sizeof(clean_name) - 1);
+    }
+
+    return g30_format_padded_cmd(clean_name, out_buf);
+}
+
+// Line 4: Boil Parameters: {hop_stand_min},{boil_addition_count},0,0,
+esp_err_t g30_encode_recipe_boil_params(uint16_t hop_stand_min, uint8_t boil_addition_count, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    snprintf(raw_cmd, sizeof(raw_cmd), "%u,%u,0,0,", hop_stand_min, boil_addition_count);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+// Line 5..: Boil Addition Stop: {time_remaining_min},
+esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]) {
+    if (out_buf == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char raw_cmd[G30_COMMAND_LEN + 1];
+    snprintf(raw_cmd, sizeof(raw_cmd), "%u,", boil_time_remaining_min);
+
+    return g30_format_padded_cmd(raw_cmd, out_buf);
+}
+
+// Mash Step: {temp_c}:{duration_min}
 esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]) {
     if (step == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -149,17 +300,6 @@ esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_
     snprintf(raw_cmd, sizeof(raw_cmd), "%u:%u",
              (unsigned int)step->temp_c,
              step->duration_min);
-
-    return g30_format_padded_cmd(raw_cmd, out_buf);
-}
-
-esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out_buf[G30_COMMAND_LEN + 1]) {
-    if (out_buf == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char raw_cmd[G30_COMMAND_LEN + 1];
-    snprintf(raw_cmd, sizeof(raw_cmd), "%u", boil_time_remaining_min);
 
     return g30_format_padded_cmd(raw_cmd, out_buf);
 }
@@ -192,6 +332,7 @@ esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
             if (sscanf(payload, "%f,%f", &target, &current) == 2) {
                 state->target_temp_c = target;
                 state->current_temp_c = current;
+                g30_resolve_interaction_message(state, state->interaction.code);
             } else {
                 return ESP_ERR_INVALID_ARG;
             }
@@ -209,10 +350,8 @@ esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
                 state->ramp_active = (ramp == 1);
                 state->interaction.required = (inter_m == 1);
                 state->interaction.code = (uint8_t)inter_c;
-                strncpy(state->interaction.message, g30_get_interaction_message((uint8_t)inter_c),
-                        sizeof(state->interaction.message) - 1);
-                state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
                 state->stage.step_index = (uint8_t)stage;
+                g30_resolve_interaction_message(state, (uint8_t)inter_c);
             } else {
                 return ESP_ERR_INVALID_ARG;
             }
@@ -247,11 +386,9 @@ esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
         case G30_NOTIF_INTERACTION: { // I{InteractionCode}
             int code = 0;
             if (sscanf(payload, "%d", &code) == 1) {
-                state->interaction.required = true;
+                state->interaction.required = (code != 0);
                 state->interaction.code = (uint8_t)code;
-                strncpy(state->interaction.message, g30_get_interaction_message((uint8_t)code),
-                        sizeof(state->interaction.message) - 1);
-                state->interaction.message[sizeof(state->interaction.message) - 1] = '\0';
+                g30_resolve_interaction_message(state, (uint8_t)code);
             } else {
                 return ESP_ERR_INVALID_ARG;
             }
