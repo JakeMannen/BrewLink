@@ -111,3 +111,7 @@ When executing specific implementation or operational tasks, agents activate the
     *   *Usage*: Implementing WiFi Station connectivity with non-blocking reconnection backoff, MQTT client setup with LWT status and QoS levels, Core 1 telemetry relay worker task, and HTTP REST client requests.
 *   **[`grainfather-g30-ble`](.agents/skills/grainfather-g30-ble/SKILL.md)**:
     *   *Usage*: Communicating with the Grainfather G30 Connect controller over BLE: USR-BLE UART service and characteristics, strict 19-byte ASCII space-padded command formatting, pacing delay enforcement (150 ms), notification parsing (`X`, `Y`, `T`, `W`, `I`, `C`), recipe transfer sequencing (`R` command, boil additions, mash steps), and Unified Data Schema mapping.
+*   **[`brewing-recipe-schemas`](.agents/skills/brewing-recipe-schemas/SKILL.md)**:
+    *   *Usage*: Parsing, validating, transforming, and crosswalk conversions between BeerXML 1.0, BeerJSON, and BrewLink Unified Recipe data schemas.
+*   **[`brewlink-external-client`](.agents/skills/brewlink-external-client/SKILL.md)**:
+    *   *Usage*: Connecting external systems, recipe managers, and dashboards to BrewLink via WebSockets (`/ws`), MQTT (with HMAC-SHA256 signature verification), and HTTP REST (`/api/equipment/*`), including 6-digit PIN pairing, API token verification, and fail-fast offline error handling.

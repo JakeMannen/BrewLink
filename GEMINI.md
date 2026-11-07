@@ -14,3 +14,5 @@ This workspace operates under the authoritative rules and skills defined in [AGE
 *   [`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md) — NimBLE Central connecting to >= 3 peripherals simultaneously, GATT discovery, and queue handoff.
 *   [`outbound-relay`](.agents/skills/outbound-relay/SKILL.md) — WiFi station, MQTT client with LWT, HTTP client, and Core 1 dispatch task.
 *   [`grainfather-g30-ble`](.agents/skills/grainfather-g30-ble/SKILL.md) — Grainfather G30 Connect BLE protocol, 19-byte padded commands, notification parsing, recipe sequence, and unified schemas.
+*   [`brewing-recipe-schemas`](.agents/skills/brewing-recipe-schemas/SKILL.md) — BeerXML 1.0, BeerJSON, and BrewLink Unified Recipe data schemas crosswalk.
+*   [`brewlink-external-client`](.agents/skills/brewlink-external-client/SKILL.md) — External client connection runbook for WebSockets, MQTT, HTTP REST, 6-digit PIN pairing, and HMAC-SHA256 signing.

@@ -5,6 +5,8 @@
 
 #include "ble_manager.h"
 #include "ble_compatibility.h"
+#include "config_store.h"
+#include "equipment_manager.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -22,7 +24,9 @@
 
 static const char *TAG = "BLE_MGR";
 
-// Grainfather G30 Service and Characteristic UUIDs (128-bit little-endian)
+// Grainfather G30 Service (16-bit 0xCDD0 and 128-bit little-endian) and Characteristic UUIDs
+static const ble_uuid16_t s_g30_svc_uuid16 = BLE_UUID16_INIT(0xCDD0);
+
 static const ble_uuid128_t s_g30_svc_uuid =
     BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xd0, 0xcd, 0x00, 0x00);
 
@@ -36,12 +40,17 @@ static QueueHandle_t s_telemetry_queue = NULL;
 static QueueHandle_t s_ble_cmd_queue = NULL;
 
 static ble_peer_device_t s_peers[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
+static uint16_t          s_svc_start_handles[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
+static uint16_t          s_svc_end_handles[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
 static ble_scan_entry_t  s_scan_entries[BLE_SCAN_MAX_RESULTS];
 static uint16_t          s_scan_count = 0;
 static bool              s_is_scanning = false;
+static bool              s_is_connecting = false;
+static bool              s_ble_synced = false;
 
-static SemaphoreHandle_t s_ble_mutex = NULL;
-static ble_peer_event_cb_t s_peer_cb = NULL;
+static SemaphoreHandle_t         s_ble_mutex = NULL;
+static ble_peer_event_cb_t       s_peer_cb = NULL;
+static ble_cmd_seq_complete_cb_t s_seq_cb = NULL;
 
 // Forward declarations
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
@@ -69,6 +78,122 @@ static int find_free_peer_slot(void) {
     return -1;
 }
 
+static bool is_addr_currently_connected_locked(const uint8_t addr[6]) {
+    for (int i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+        if (s_peers[i].connected && memcmp(s_peers[i].addr, addr, 6) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool is_addr_disconnected_paired_device(const uint8_t addr[6], paired_ble_device_t *out_paired) {
+    bool already_conn = false;
+    if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        already_conn = is_addr_currently_connected_locked(addr);
+        xSemaphoreGive(s_ble_mutex);
+    }
+    if (already_conn) {
+        return false;
+    }
+
+    // 1. Check NVS paired BLE registry
+    paired_ble_device_t paired[CONFIG_STORE_MAX_PAIRED_BLE];
+    if (config_store_get_paired_ble(paired) == ESP_OK) {
+        for (uint8_t i = 0; i < CONFIG_STORE_MAX_PAIRED_BLE; i++) {
+            if (paired[i].active && memcmp(paired[i].addr, addr, 6) == 0) {
+                if (out_paired != NULL) {
+                    *out_paired = paired[i];
+                }
+                return true;
+            }
+        }
+    }
+
+    // 2. Also check in-memory equipment_manager paired slots
+    for (uint8_t i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+        equipment_slot_t slot;
+        if (equipment_manager_get_slot(i, &slot) == ESP_OK &&
+            slot.paired && !slot.connected && memcmp(slot.mac, addr, 6) == 0) {
+            if (out_paired != NULL) {
+                memset(out_paired, 0, sizeof(*out_paired));
+                out_paired->active = true;
+                memcpy(out_paired->addr, slot.mac, 6);
+                out_paired->equipment_type = (uint8_t)slot.equipment_type;
+                strncpy(out_paired->name, slot.name, sizeof(out_paired->name) - 1);
+                strncpy(out_paired->model, slot.model, sizeof(out_paired->model) - 1);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool has_disconnected_paired_devices(void) {
+    paired_ble_device_t paired[CONFIG_STORE_MAX_PAIRED_BLE];
+    bool any_disconnected = false;
+
+    if (config_store_get_paired_ble(paired) == ESP_OK) {
+        if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            for (uint8_t i = 0; i < CONFIG_STORE_MAX_PAIRED_BLE; i++) {
+                if (paired[i].active && !is_addr_currently_connected_locked(paired[i].addr)) {
+                    any_disconnected = true;
+                    break;
+                }
+            }
+            xSemaphoreGive(s_ble_mutex);
+        }
+    }
+    if (any_disconnected) {
+        return true;
+    }
+
+    for (uint8_t i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+        equipment_slot_t slot;
+        if (equipment_manager_get_slot(i, &slot) == ESP_OK && slot.paired && !slot.connected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Purge queued commands matching a disconnected/failed peer MAC and report aborted sequence if needed
+static void purge_queued_commands_for_mac(const uint8_t mac[6], bool notify_abort) {
+    if (s_ble_cmd_queue == NULL || mac == NULL) {
+        return;
+    }
+
+    UBaseType_t waiting = uxQueueMessagesWaiting(s_ble_cmd_queue);
+    if (waiting == 0) {
+        return;
+    }
+
+    char aborted_req_id[16] = {0};
+    char aborted_action[24] = {0};
+    bool found_aborted_seq = false;
+
+    for (UBaseType_t i = 0; i < waiting; i++) {
+        ble_outbound_cmd_packet_t pkt;
+        if (xQueueReceive(s_ble_cmd_queue, &pkt, 0) == pdTRUE) {
+            if (memcmp(pkt.mac, mac, 6) == 0) {
+                if (pkt.seq_total > 0 && !found_aborted_seq) {
+                    strncpy(aborted_req_id, pkt.req_id, sizeof(aborted_req_id) - 1);
+                    strncpy(aborted_action, pkt.action[0] ? pkt.action : "load_recipe", sizeof(aborted_action) - 1);
+                    found_aborted_seq = true;
+                }
+            } else {
+                // Re-queue packets belonging to other connected peers
+                xQueueSendToBack(s_ble_cmd_queue, &pkt, 0);
+            }
+        }
+    }
+
+    if (notify_abort && found_aborted_seq && s_seq_cb != NULL) {
+        ESP_LOGW(TAG, "Aborted in-flight BLE command sequence (req_id='%s') due to disconnect", aborted_req_id);
+        s_seq_cb(mac, aborted_req_id, aborted_action, ESP_ERR_INVALID_STATE);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // BLE Outbound Command Worker Task (Pinned to Protocol Core 0)
 // -----------------------------------------------------------------------------
@@ -77,13 +202,15 @@ static void ble_cmd_worker_task(void *pvParameters) {
     ESP_LOGI(TAG, "BLE command worker task active on core %d", xPortGetCoreID());
 
     while (1) {
-        if (xQueueReceive(s_ble_cmd_queue, &cmd_pkt, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_ble_cmd_queue, &cmd_pkt, pdMS_TO_TICKS(1500)) == pdTRUE) {
             uint16_t target_handle = cmd_pkt.conn_handle;
             uint16_t write_handle = 0;
+            uint8_t resolved_mac[6] = {0};
+            memcpy(resolved_mac, cmd_pkt.mac, 6);
 
             if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 int peer_idx = -1;
-                if (target_handle != BLE_HS_CONN_HANDLE_NONE) {
+                if (target_handle != BLE_HS_CONN_HANDLE_NONE && target_handle != 0) {
                     peer_idx = find_peer_by_handle(target_handle);
                 } else {
                     bool has_mac = false;
@@ -106,6 +233,7 @@ static void ble_cmd_worker_task(void *pvParameters) {
                             if (s_peers[i].connected) {
                                 peer_idx = i;
                                 target_handle = s_peers[i].conn_handle;
+                                memcpy(resolved_mac, s_peers[i].addr, 6);
                                 break;
                             }
                         }
@@ -114,25 +242,68 @@ static void ble_cmd_worker_task(void *pvParameters) {
 
                 if (peer_idx >= 0 && s_peers[peer_idx].connected) {
                     write_handle = s_peers[peer_idx].write_val_handle;
+                    memcpy(resolved_mac, s_peers[peer_idx].addr, 6);
                 }
                 xSemaphoreGive(s_ble_mutex);
             }
 
             if (target_handle != BLE_HS_CONN_HANDLE_NONE && write_handle != 0) {
-                ESP_LOGI(TAG, "Writing BLE command to conn %d (handle 0x%04X): '%.*s'",
+                ESP_LOGI(TAG, "Writing BLE command [%u/%u] to conn %d (handle 0x%04X): '%.*s'",
+                         cmd_pkt.seq_idx, cmd_pkt.seq_total,
                          target_handle, write_handle, cmd_pkt.len, cmd_pkt.cmd_bytes);
                 int rc = ble_gattc_write_no_rsp_flat(target_handle, write_handle,
                                                      cmd_pkt.cmd_bytes, cmd_pkt.len);
                 if (rc != 0) {
                     ESP_LOGE(TAG, "ble_gattc_write_no_rsp_flat failed: rc=%d", rc);
+                    purge_queued_commands_for_mac(resolved_mac, false);
+                    if (cmd_pkt.seq_total > 0 && s_seq_cb != NULL) {
+                        s_seq_cb(resolved_mac, cmd_pkt.req_id,
+                                 cmd_pkt.action[0] ? cmd_pkt.action : "cmd",
+                                 ESP_ERR_INVALID_STATE);
+                    }
+                } else if (cmd_pkt.seq_total > 0 && cmd_pkt.seq_idx == cmd_pkt.seq_total) {
+                    if (s_seq_cb != NULL) {
+                        s_seq_cb(resolved_mac, cmd_pkt.req_id,
+                                 cmd_pkt.action[0] ? cmd_pkt.action : "cmd",
+                                 ESP_OK);
+                    }
                 }
             } else {
-                ESP_LOGW(TAG, "Cannot dispatch command; no active BLE connection handle or write handle (conn=%d, write_handle=0x%04X)",
+                ESP_LOGW(TAG, "Cannot dispatch command; peer disconnected mid-sequence (conn=%d, write_handle=0x%04X)",
                          target_handle, write_handle);
+                purge_queued_commands_for_mac(resolved_mac, false);
+                if (cmd_pkt.seq_total > 0 && s_seq_cb != NULL) {
+                    s_seq_cb(resolved_mac, cmd_pkt.req_id,
+                             cmd_pkt.action[0] ? cmd_pkt.action : "cmd",
+                             ESP_ERR_INVALID_STATE);
+                }
             }
 
             uint16_t delay_ms = cmd_pkt.delay_after_ms > 0 ? cmd_pkt.delay_after_ms : G30_WRITE_PACING_MS;
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        } else {
+            // 1. Refresh live HCI RSSI for all connected peers
+            if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                for (int i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+                    if (s_peers[i].connected && s_peers[i].conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+                        int8_t live_rssi = 0;
+                        if (ble_gap_conn_rssi(s_peers[i].conn_handle, &live_rssi) == 0 && live_rssi != 0) {
+                            s_peers[i].rssi = live_rssi;
+                        }
+                    }
+                }
+                xSemaphoreGive(s_ble_mutex);
+            }
+
+            // 2. Periodic check: if any paired BLE equipment is currently disconnected, scan to auto-reconnect
+            if (s_ble_synced && !ble_gap_disc_active() && !ble_gap_conn_active()) {
+                s_is_scanning = false;
+                s_is_connecting = false;
+                if (has_disconnected_paired_devices()) {
+                    ESP_LOGI(TAG, "Paired BLE equipment offline; starting background auto-reconnect scan...");
+                    ble_manager_start_scan(5);
+                }
+            }
         }
     }
 }
@@ -145,12 +316,18 @@ static void ble_handle_notify_rx(uint16_t conn_handle, uint16_t attr_handle, str
         return;
     }
 
+    int8_t live_rssi = 0;
+    bool have_live_rssi = (ble_gap_conn_rssi(conn_handle, &live_rssi) == 0 && live_rssi != 0);
+
     ble_telemetry_packet_t packet;
     memset(&packet, 0, sizeof(packet));
 
     if (xSemaphoreTake(s_ble_mutex, 0) == pdTRUE) {
         int peer_idx = find_peer_by_handle(conn_handle);
         if (peer_idx >= 0) {
+            if (have_live_rssi) {
+                s_peers[peer_idx].rssi = live_rssi;
+            }
             packet.device_index = (uint8_t)peer_idx;
             memcpy(packet.mac, s_peers[peer_idx].addr, 6);
             packet.rssi = s_peers[peer_idx].rssi;
@@ -239,26 +416,42 @@ static int ble_on_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *er
 static int ble_on_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *error,
                            const struct ble_gatt_svc *service, void *arg) {
     if (error->status == 0 && service != NULL) {
-        if (ble_uuid_cmp(&service->uuid.u, &s_g30_svc_uuid.u) == 0) {
-            ESP_LOGI(TAG, "Discovered G30 Primary Service (0xCDD0). Discovering characteristics...");
+        if (ble_uuid_cmp(&service->uuid.u, &s_g30_svc_uuid.u) == 0 ||
+            ble_uuid_cmp(&service->uuid.u, &s_g30_svc_uuid16.u) == 0) {
+            ESP_LOGI(TAG, "Discovered G30 Primary Service (0xCDD0, handles %u..%u)",
+                     service->start_handle, service->end_handle);
             if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 int peer_idx = find_peer_by_handle(conn_handle);
                 if (peer_idx >= 0) {
                     s_peers[peer_idx].equipment_type = EQUIPMENT_TYPE_BOILER;
+                    s_svc_start_handles[peer_idx] = service->start_handle;
+                    s_svc_end_handles[peer_idx] = service->end_handle;
                 }
                 xSemaphoreGive(s_ble_mutex);
             }
-            ble_gattc_disc_all_chrs(conn_handle, service->start_handle, service->end_handle, ble_on_disc_chr, NULL);
         }
     } else if (service == NULL) {
-        // Discovery finished; verify if a compatible service was found
+        // Service discovery finished; launch characteristic discovery sequentially
+        uint16_t start_h = 0;
+        uint16_t end_h = 0;
+        bool has_compat_svc = false;
+
         if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             int peer_idx = find_peer_by_handle(conn_handle);
-            if (peer_idx >= 0 && s_peers[peer_idx].equipment_type == EQUIPMENT_TYPE_UNKNOWN) {
-                ESP_LOGW(TAG, "Connected device on handle %d offers no compatible brewing service; disconnecting", conn_handle);
-                ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (peer_idx >= 0) {
+                start_h = s_svc_start_handles[peer_idx];
+                end_h = s_svc_end_handles[peer_idx];
+                has_compat_svc = (s_peers[peer_idx].equipment_type != EQUIPMENT_TYPE_UNKNOWN);
             }
             xSemaphoreGive(s_ble_mutex);
+        }
+
+        if (start_h != 0 && end_h != 0) {
+            ESP_LOGI(TAG, "Discovering G30 characteristics (handles %u..%u)...", start_h, end_h);
+            ble_gattc_disc_all_chrs(conn_handle, start_h, end_h, ble_on_disc_chr, NULL);
+        } else if (!has_compat_svc) {
+            ESP_LOGW(TAG, "Connected device on handle %d offers no compatible brewing service; disconnecting", conn_handle);
+            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
     }
     return 0;
@@ -282,6 +475,12 @@ static int ble_on_mtu(uint16_t conn_handle, const struct ble_gatt_error *error,
 static int ble_gap_event(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
         case BLE_GAP_EVENT_DISC: {
+            // 1. Check FIRST if this advertising peripheral is a paired device that is currently offline.
+            //    This ensures we auto-reconnect immediately even if the current packet is an ADV_IND
+            //    before SCAN_RSP (which carries the local name "Grain").
+            paired_ble_device_t paired_dev;
+            bool is_disconnected_paired = is_addr_disconnected_paired_device(event->disc.addr.val, &paired_dev);
+
             struct ble_hs_adv_fields fields;
             memset(&fields, 0, sizeof(fields));
             int rc = ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data);
@@ -319,15 +518,20 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 &compat
             );
 
-            // Filter: ONLY connectable devices defined in sourcecode are recorded
-            if (!is_compat || compat == NULL) {
+            // Filter: ONLY connectable devices defined in sourcecode (or already paired) are recorded
+            if ((!is_compat || compat == NULL) && !is_disconnected_paired) {
                 return 0;
             }
 
-            bool is_g30 = (compat->equipment_type == EQUIPMENT_TYPE_BOILER &&
-                           (strstr(compat->model_name, "Grainfather") != NULL));
+            equipment_type_t eq_type = compat ? compat->equipment_type : (equipment_type_t)paired_dev.equipment_type;
+            if (eq_type == EQUIPMENT_TYPE_UNKNOWN) {
+                eq_type = EQUIPMENT_TYPE_BOILER;
+            }
+            const char *model_str = compat ? compat->model_name :
+                                    (paired_dev.model[0] ? paired_dev.model : "Grainfather G30 Connect");
+            bool is_g30 = (eq_type == EQUIPMENT_TYPE_BOILER && (strstr(model_str, "Grainfather") != NULL));
 
-            // Record in scan table
+            // Record in scan table (including latest RSSI)
             if (xSemaphoreTake(s_ble_mutex, 0) == pdTRUE) {
                 int found_idx = -1;
                 for (int i = 0; i < s_scan_count; i++) {
@@ -344,8 +548,8 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     }
                     s_scan_entries[found_idx].is_grainfather = is_g30;
                     s_scan_entries[found_idx].is_compatible = true;
-                    s_scan_entries[found_idx].equipment_type = compat->equipment_type;
-                    strncpy(s_scan_entries[found_idx].model, compat->model_name, sizeof(s_scan_entries[found_idx].model) - 1);
+                    s_scan_entries[found_idx].equipment_type = eq_type;
+                    strncpy(s_scan_entries[found_idx].model, model_str, sizeof(s_scan_entries[found_idx].model) - 1);
                 } else if (s_scan_count < BLE_SCAN_MAX_RESULTS) {
                     ble_scan_entry_t *entry = &s_scan_entries[s_scan_count++];
                     memcpy(entry->addr, event->disc.addr.val, 6);
@@ -353,28 +557,58 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     entry->rssi = event->disc.rssi;
                     if (dev_name[0] != '\0') {
                         strncpy(entry->name, dev_name, sizeof(entry->name) - 1);
+                    } else if (is_disconnected_paired && paired_dev.name[0] != '\0') {
+                        strncpy(entry->name, paired_dev.name, sizeof(entry->name) - 1);
                     } else {
-                        strncpy(entry->name, compat->model_name, sizeof(entry->name) - 1);
+                        strncpy(entry->name, model_str, sizeof(entry->name) - 1);
                     }
                     entry->is_grainfather = is_g30;
                     entry->is_compatible = true;
-                    entry->equipment_type = compat->equipment_type;
-                    strncpy(entry->model, compat->model_name, sizeof(entry->model) - 1);
+                    entry->equipment_type = eq_type;
+                    strncpy(entry->model, model_str, sizeof(entry->model) - 1);
                     entry->is_connected = (find_peer_by_handle(BLE_HS_CONN_HANDLE_NONE) != -1);
                 }
                 xSemaphoreGive(s_ble_mutex);
+            }
+
+            // Auto-reconnect if this advertising peripheral is a paired device that is currently offline
+            if (is_disconnected_paired && !ble_gap_conn_active()) {
+                ESP_LOGI(TAG, "Paired equipment '%s' (%02X:%02X:%02X:%02X:%02X:%02X, RSSI %d dBm) detected; auto-reconnecting...",
+                         paired_dev.name[0] ? paired_dev.name : model_str,
+                         event->disc.addr.val[0], event->disc.addr.val[1], event->disc.addr.val[2],
+                         event->disc.addr.val[3], event->disc.addr.val[4], event->disc.addr.val[5],
+                         event->disc.rssi);
+                ble_gap_disc_cancel();
+                s_is_scanning = false;
+                s_is_connecting = true;
+                int conn_rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &event->disc.addr, 5000, NULL, ble_gap_event, NULL);
+                if (conn_rc != 0) {
+                    ESP_LOGW(TAG, "Auto-reconnect ble_gap_connect failed: rc=%d", conn_rc);
+                    s_is_connecting = false;
+                }
             }
             return 0;
         }
 
         case BLE_GAP_EVENT_CONNECT: {
+            s_is_connecting = false;
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "BLE connected! conn_handle=%d", event->connect.conn_handle);
+                ble_peer_device_t connected_peer;
+                bool has_connected_peer = false;
+
+                int8_t live_rssi = 0;
+                bool have_live_rssi = (ble_gap_conn_rssi(event->connect.conn_handle, &live_rssi) == 0 && live_rssi != 0);
+
                 if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
                     int slot = find_free_peer_slot();
                     if (slot >= 0) {
+                        memset(&s_peers[slot], 0, sizeof(ble_peer_device_t));
+                        s_svc_start_handles[slot] = 0;
+                        s_svc_end_handles[slot] = 0;
                         s_peers[slot].conn_handle = event->connect.conn_handle;
                         s_peers[slot].connected = true;
+                        s_peers[slot].rssi = have_live_rssi ? live_rssi : -60;
 
                         struct ble_gap_conn_desc desc;
                         if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
@@ -382,22 +616,47 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                             s_peers[slot].addr_type = desc.peer_id_addr.type;
                         }
 
-                        // Check if device name was known from scan
+                        // Check if device name and RSSI were known from scan
                         for (int i = 0; i < s_scan_count; i++) {
                             if (memcmp(s_scan_entries[i].addr, s_peers[slot].addr, 6) == 0) {
                                 strncpy(s_peers[slot].device_name, s_scan_entries[i].name, sizeof(s_peers[slot].device_name) - 1);
                                 s_peers[slot].equipment_type = s_scan_entries[i].equipment_type;
+                                if (!have_live_rssi && s_scan_entries[i].rssi != 0) {
+                                    s_peers[slot].rssi = s_scan_entries[i].rssi;
+                                }
                                 break;
                             }
                         }
                         if (s_peers[slot].device_name[0] == '\0') {
-                            snprintf(s_peers[slot].device_name, sizeof(s_peers[slot].device_name),
-                                     "Equipment-%02X%02X", s_peers[slot].addr[4], s_peers[slot].addr[5]);
+                            paired_ble_device_t paired_list[CONFIG_STORE_MAX_PAIRED_BLE];
+                            if (config_store_get_paired_ble(paired_list) == ESP_OK) {
+                                for (uint8_t p = 0; p < CONFIG_STORE_MAX_PAIRED_BLE; p++) {
+                                    if (paired_list[p].active && memcmp(paired_list[p].addr, s_peers[slot].addr, 6) == 0) {
+                                        strncpy(s_peers[slot].device_name,
+                                                paired_list[p].model[0] ? paired_list[p].model : paired_list[p].name,
+                                                sizeof(s_peers[slot].device_name) - 1);
+                                        s_peers[slot].equipment_type = (equipment_type_t)paired_list[p].equipment_type;
+                                        break;
+                                    }
+                                }
+                            }
                         }
+                        if (s_peers[slot].device_name[0] == '\0') {
+                            strncpy(s_peers[slot].device_name, "Grainfather G30 Connect", sizeof(s_peers[slot].device_name) - 1);
+                            s_peers[slot].equipment_type = EQUIPMENT_TYPE_BOILER;
+                        }
+
+                        connected_peer = s_peers[slot];
+                        has_connected_peer = true;
                     } else {
                         ESP_LOGW(TAG, "No free peer slot available for conn_handle %d", event->connect.conn_handle);
                     }
                     xSemaphoreGive(s_ble_mutex);
+                }
+
+                // Immediately notify lifecycle callback so equipment slot & NVS pairing are persisted right away
+                if (has_connected_peer && s_peer_cb != NULL) {
+                    s_peer_cb(&connected_peer, true);
                 }
 
                 // Exchange MTU
@@ -409,6 +668,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
         }
 
         case BLE_GAP_EVENT_DISCONNECT: {
+            s_is_connecting = false;
             ESP_LOGW(TAG, "BLE disconnected! conn_handle=%d (reason=%d)",
                      event->disconnect.conn.conn_handle, event->disconnect.reason);
 
@@ -422,12 +682,23 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     had_peer = true;
                     memset(&s_peers[slot], 0, sizeof(ble_peer_device_t));
                     s_peers[slot].conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                    s_svc_start_handles[slot] = 0;
+                    s_svc_end_handles[slot] = 0;
                 }
                 xSemaphoreGive(s_ble_mutex);
             }
 
-            if (had_peer && s_peer_cb != NULL) {
-                s_peer_cb(&disc_peer, false);
+            if (had_peer) {
+                purge_queued_commands_for_mac(disc_peer.addr, true);
+                if (s_peer_cb != NULL) {
+                    s_peer_cb(&disc_peer, false);
+                }
+            }
+
+            // Immediately start auto-reconnect scan if paired equipment is now offline
+            if (s_ble_synced && !ble_gap_disc_active() && !ble_gap_conn_active() && has_disconnected_paired_devices()) {
+                ESP_LOGI(TAG, "Starting immediate auto-reconnect scan after disconnect...");
+                ble_manager_start_scan(5);
             }
             return 0;
         }
@@ -458,7 +729,12 @@ static void ble_host_task(void *param) {
 }
 
 static void ble_on_sync(void) {
+    s_ble_synced = true;
     ESP_LOGI(TAG, "NimBLE host synchronized. Multi-central BLE ready.");
+    if (has_disconnected_paired_devices()) {
+        ESP_LOGI(TAG, "Paired BLE equipment found in NVS; initiating power-on auto-reconnect scan...");
+        ble_manager_start_scan(15);
+    }
 }
 
 esp_err_t ble_manager_init(QueueHandle_t telemetry_queue, QueueHandle_t cmd_queue) {
@@ -499,9 +775,15 @@ esp_err_t ble_manager_register_peer_cb(ble_peer_event_cb_t cb) {
     return ESP_OK;
 }
 
+esp_err_t ble_manager_register_seq_cb(ble_cmd_seq_complete_cb_t cb) {
+    s_seq_cb = cb;
+    return ESP_OK;
+}
+
 esp_err_t ble_manager_start_scan(uint32_t duration_sec) {
-    if (s_is_scanning) {
+    if (ble_gap_disc_active() || s_is_scanning) {
         ble_gap_disc_cancel();
+        s_is_scanning = false;
     }
 
     if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -511,7 +793,7 @@ esp_err_t ble_manager_start_scan(uint32_t duration_sec) {
     }
 
     struct ble_gap_disc_params disc_params = {
-        .filter_duplicates = 1,
+        .filter_duplicates = 0,
         .passive = 0,
         .itvl = BLE_SCAN_INTERVAL_MS * 1000 / 625,
         .window = BLE_SCAN_WINDOW_MS * 1000 / 625,
@@ -579,6 +861,18 @@ bool ble_manager_is_addr_compatible(const uint8_t *addr) {
         }
         xSemaphoreGive(s_ble_mutex);
     }
+
+    if (!compat) {
+        paired_ble_device_t paired_list[CONFIG_STORE_MAX_PAIRED_BLE];
+        if (config_store_get_paired_ble(paired_list) == ESP_OK) {
+            for (uint8_t p = 0; p < CONFIG_STORE_MAX_PAIRED_BLE; p++) {
+                if (paired_list[p].active && memcmp(paired_list[p].addr, addr, 6) == 0) {
+                    compat = true;
+                    break;
+                }
+            }
+        }
+    }
     return compat;
 }
 
@@ -606,8 +900,10 @@ esp_err_t ble_manager_connect(const uint8_t *addr, uint8_t addr_type) {
     ESP_LOGI(TAG, "Initiating BLE connection to compatible device %02X:%02X:%02X:%02X:%02X:%02X (type=%d)...",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr_type);
 
+    s_is_connecting = true;
     int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &target_addr, 30000, NULL, ble_gap_event, NULL);
     if (rc != 0) {
+        s_is_connecting = false;
         ESP_LOGE(TAG, "ble_gap_connect failed: rc=%d", rc);
         return ESP_FAIL;
     }
@@ -620,6 +916,20 @@ esp_err_t ble_manager_disconnect(uint16_t conn_handle) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    uint8_t peer_addr[6] = {0};
+    bool has_addr = false;
+    if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        int slot = find_peer_by_handle(conn_handle);
+        if (slot >= 0) {
+            memcpy(peer_addr, s_peers[slot].addr, 6);
+            has_addr = true;
+        }
+        xSemaphoreGive(s_ble_mutex);
+    }
+    if (has_addr) {
+        config_store_remove_paired_ble(peer_addr);
+    }
+
     ESP_LOGI(TAG, "Terminating BLE connection handle %d...", conn_handle);
     int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     return (rc == 0) ? ESP_OK : ESP_FAIL;
@@ -629,6 +939,9 @@ esp_err_t ble_manager_disconnect_by_addr(const uint8_t *addr) {
     if (addr == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    // Explicitly unpair from NVS so it does not auto-reconnect
+    config_store_remove_paired_ble(addr);
 
     uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
     if (xSemaphoreTake(s_ble_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -645,7 +958,7 @@ esp_err_t ble_manager_disconnect_by_addr(const uint8_t *addr) {
         return ble_manager_disconnect(handle);
     }
 
-    return ESP_ERR_NOT_FOUND;
+    return ESP_OK;
 }
 
 esp_err_t ble_manager_get_peers(ble_peer_device_t *out_peers, uint8_t max_peers, uint8_t *count) {
@@ -660,6 +973,10 @@ esp_err_t ble_manager_get_peers(ble_peer_device_t *out_peers, uint8_t max_peers,
     uint8_t copied = 0;
     for (int i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS && copied < max_peers; i++) {
         if (s_peers[i].connected) {
+            int8_t live_rssi = 0;
+            if (ble_gap_conn_rssi(s_peers[i].conn_handle, &live_rssi) == 0 && live_rssi != 0) {
+                s_peers[i].rssi = live_rssi;
+            }
             memcpy(&out_peers[copied], &s_peers[i], sizeof(ble_peer_device_t));
             copied++;
         }

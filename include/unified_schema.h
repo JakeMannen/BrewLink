@@ -91,10 +91,11 @@ typedef struct {
 } unified_cooler_heater_state_t;
 
 // =============================================================================
-// Unified Recipe Definitions
+// Unified Recipe Definitions (Equipment-Agnostic: Boilers, Fermenters, Coolers)
 // =============================================================================
 #define MAX_MASH_STEPS              8
 #define MAX_BOIL_ADDITIONS          8
+#define MAX_FERMENTATION_STEPS      4
 #define MAX_RECIPE_NAME_LEN         32
 
 typedef struct {
@@ -103,15 +104,24 @@ typedef struct {
 } unified_mash_step_t;
 
 typedef struct {
-    char                name[MAX_RECIPE_NAME_LEN];
-    uint16_t            boil_time_min;
-    uint16_t            hop_stand_min;
-    float               mash_water_l;
-    float               sparge_water_l;
-    uint8_t             mash_step_count;
-    unified_mash_step_t mash_steps[MAX_MASH_STEPS];
-    uint8_t             boil_addition_count;
-    uint16_t            boil_additions_min[MAX_BOIL_ADDITIONS]; // time remaining in boil
+    float    temp_c;
+    uint16_t duration_hours;
+} unified_fermentation_step_t;
+
+typedef struct {
+    char                        name[MAX_RECIPE_NAME_LEN];
+    uint16_t                    boil_time_min;
+    uint16_t                    hop_stand_min;
+    float                       mash_water_l;
+    float                       sparge_water_l;
+    uint8_t                     mash_step_count;
+    unified_mash_step_t         mash_steps[MAX_MASH_STEPS];
+    uint8_t                     boil_addition_count;
+    uint16_t                    boil_additions_min[MAX_BOIL_ADDITIONS]; // time remaining in boil
+    uint8_t                     fermentation_step_count;
+    unified_fermentation_step_t fermentation_steps[MAX_FERMENTATION_STEPS];
+    float                       target_og_sg;
+    float                       target_fg_sg;
 } unified_recipe_t;
 
 // =============================================================================
@@ -136,6 +146,8 @@ typedef enum {
 
 typedef struct {
     uint8_t          target_mac[6];
+    uint8_t          target_slot;    // Optional 1-based slot index (1..3); 0 = not specified
+    char             target_name[32];// Optional unique device name
     equipment_type_t equipment_type;
     command_action_t action;
     char             req_id[16];
@@ -160,6 +172,10 @@ typedef struct {
     uint8_t  len;
     char     cmd_bytes[BLE_G30_MAX_CMD_PAYLOAD];
     uint16_t delay_after_ms;         // Minimum inter-packet pacing delay (e.g. 150 ms)
+    char     req_id[16];             // Correlation ID for sequence completion tracking
+    char     action[24];             // Action name for cmd_ack reporting
+    uint8_t  seq_idx;                // 1-based packet index in command sequence (0 = untracked)
+    uint8_t  seq_total;              // Total packets in sequence (when seq_idx == seq_total, emit completion)
 } ble_outbound_cmd_packet_t;
 
 #ifdef __cplusplus

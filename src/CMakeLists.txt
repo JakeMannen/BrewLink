@@ -4,6 +4,8 @@ idf_component_register(
         "grainfather_g30.c"
         "ble_compatibility.c"
         "config_store.c"
+        "auth_manager.c"
+        "equipment_manager.c"
         "wifi_manager.c"
         "mqtt_manager.c"
         "ble_manager.c"
@@ -23,4 +25,6 @@ idf_component_register(
         freertos 
         log 
         cjson
+        driver
+        esp_timer
 )

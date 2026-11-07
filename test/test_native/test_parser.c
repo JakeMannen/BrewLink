@@ -6,10 +6,14 @@
 #include "unified_schema.h"
 #include "grainfather_g30.h"
 #include "ble_compatibility.h"
+#include "auth_manager.h"
+#include "equipment_manager.h"
 
 // Include source directly for host testing harness
 #include "../../src/grainfather_g30.c"
 #include "../../src/ble_compatibility.c"
+#include "../../src/auth_manager.c"
+#include "../../src/equipment_manager.c"
 
 void setUp(void) {
     // Set up before each test
@@ -900,6 +904,324 @@ void test_g30_master_recipe_full_lifecycle(void) {
 }
 
 // =============================================================================
+// Pairing, Token Auth, and MQTT HMAC-SHA256 Tests
+// =============================================================================
+void test_auth_pin_pairing_and_token_verification(void) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_init());
+
+    char pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
+    uint32_t ttl_sec = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(pin, &ttl_sec));
+    TEST_ASSERT_EQUAL_UINT32(6, strlen(pin));
+    TEST_ASSERT_EQUAL_UINT32(AUTH_PAIRING_WINDOW_SEC, ttl_sec);
+
+    // Reject wrong PIN
+    char token[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, auth_manager_claim_pin("000000", "TestClient", token, topic_key));
+
+    // Claim valid PIN
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin(pin, "BrewFather Bridge", token, topic_key));
+    TEST_ASSERT_TRUE(strncmp(token, "bl_", 3) == 0);
+    TEST_ASSERT_TRUE(strncmp(topic_key, "tk_", 3) == 0);
+
+    // Verify Bearer token and raw token
+    char bearer_hdr[128];
+    snprintf(bearer_hdr, sizeof(bearer_hdr), "Bearer %s", token);
+    TEST_ASSERT_TRUE(auth_manager_verify_token(bearer_hdr));
+    TEST_ASSERT_TRUE(auth_manager_verify_token(token));
+    TEST_ASSERT_FALSE(auth_manager_verify_token("bl_invalid_token_12345"));
+}
+
+void test_auth_code_free_push_button_pairing_and_discovery_beacon(void) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_init());
+
+    // Before pairing window opens, discovery beacon fails with ESP_ERR_INVALID_STATE
+    char beacon[384] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, auth_manager_format_discovery_beacon("C44F331A8B20", "192.168.1.50", 80, beacon, sizeof(beacon)));
+
+    // Open 60-second push-button pairing window
+    char pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
+    uint32_t ttl_sec = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(pin, &ttl_sec));
+    TEST_ASSERT_EQUAL_UINT32(AUTH_PAIRING_WINDOW_SEC, ttl_sec);
+
+    // Format discovery broadcast beacon (UDP :53540 / MQTT brewlink/discovery/<gw_id>)
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_format_discovery_beacon("C44F331A8B20", "192.168.1.50", 80, beacon, sizeof(beacon)));
+    TEST_ASSERT_NOT_NULL(strstr(beacon, "\"event\":\"brewlink_pairing\""));
+    TEST_ASSERT_NOT_NULL(strstr(beacon, "\"gateway_id\":\"C44F331A8B20\""));
+    TEST_ASSERT_NOT_NULL(strstr(beacon, "\"claim_url\":\"http://192.168.1.50/api/pair/claim\""));
+    TEST_ASSERT_NOT_NULL(strstr(beacon, "\"ws_url\":\"ws://192.168.1.50/ws\""));
+
+    // Claim pairing WITHOUT a PIN (code-free physical push-button claim: pin == NULL)
+    char token[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin(NULL, "Headless External Client", token, topic_key));
+    TEST_ASSERT_TRUE(strncmp(token, "bl_", 3) == 0);
+    TEST_ASSERT_TRUE(strncmp(topic_key, "tk_", 3) == 0);
+    TEST_ASSERT_TRUE(auth_manager_verify_token(token));
+
+    // Single-claim lockout: second claim attempt immediately fails because window closed on first claim
+    char token2[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char topic_key2[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, auth_manager_claim_pin(NULL, "Attacker Client", token2, topic_key2));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, auth_manager_format_discovery_beacon("C44F331A8B20", "192.168.1.50", 80, beacon, sizeof(beacon)));
+}
+
+void test_auth_hmac_sha256_and_mqtt_command_signing(void) {
+    // RFC 4231 Test Case 2: Key = "Jefe", Data = "what do ya want for nothing?"
+    const char *key = "Jefe";
+    const char *msg = "what do ya want for nothing?";
+    char hex_out[AUTH_HMAC_HEX_LEN + 1] = {0};
+
+    esp_err_t err = auth_manager_compute_hmac_sha256_hex(key, msg, hex_out);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, err);
+    TEST_ASSERT_EQUAL_STRING("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", hex_out);
+
+    // Pair a client and test MQTT HMAC command verification
+    auth_manager_init();
+    char pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
+    char token[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    auth_manager_start_pairing(pin, NULL);
+    auth_manager_claim_pin(pin, "MQTT Recipe Uploader", token, topic_key);
+
+    const char *req_id = "req-4821";
+    const char *action = "load_recipe";
+    uint32_t ts = 1712678000;
+    char signing_input[128];
+    snprintf(signing_input, sizeof(signing_input), "%s:%s:%lu", req_id, action, (unsigned long)ts);
+    char valid_sig[AUTH_HMAC_HEX_LEN + 1] = {0};
+    auth_manager_compute_hmac_sha256_hex(token, signing_input, valid_sig);
+
+    TEST_ASSERT_TRUE(auth_manager_verify_mqtt_command(req_id, action, ts, valid_sig, NULL));
+    TEST_ASSERT_FALSE(auth_manager_verify_mqtt_command(req_id, "set_pump", ts, valid_sig, NULL));
+    TEST_ASSERT_FALSE(auth_manager_verify_mqtt_command(req_id, action, ts + 1, valid_sig, NULL));
+}
+
+void test_auth_unique_client_names_and_deletion(void) {
+    auth_manager_set_test_credentials(NULL, NULL, false);
+
+    // Pair Client 1 presenting "Brewfather"
+    char token1[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char tk1[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin(NULL, "Brewfather", token1, tk1));
+
+    // Pair Client 2 also presenting "Brewfather"
+    char token2[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char tk2[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin(NULL, "Brewfather", token2, tk2));
+
+    paired_client_t clients[CONFIG_STORE_MAX_PAIRED_CLIENTS];
+    uint8_t count = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_get_paired_clients(clients, &count));
+    TEST_ASSERT_EQUAL_UINT8(2, count);
+    TEST_ASSERT_TRUE(clients[0].active);
+    TEST_ASSERT_TRUE(clients[1].active);
+
+    // Both names start with "Brewfather-" followed by 4 hex chars and are guaranteed unique
+    TEST_ASSERT_EQUAL_INT(0, strncmp(clients[0].client_name, "Brewfather-", 11));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(clients[1].client_name, "Brewfather-", 11));
+    TEST_ASSERT_EQUAL_UINT32(15, strlen(clients[0].client_name));
+    TEST_ASSERT_EQUAL_UINT32(15, strlen(clients[1].client_name));
+    TEST_ASSERT_FALSE(strcmp(clients[0].client_name, clients[1].client_name) == 0);
+
+    // Both clients' API tokens are valid simultaneously
+    TEST_ASSERT_TRUE(auth_manager_verify_token(token1));
+    TEST_ASSERT_TRUE(auth_manager_verify_token(token2));
+
+    // Delete Client 1 by its unique name -> token1 is immediately revoked, token2 stays valid
+    char deleted_name[CONFIG_STORE_CLIENT_NAME_MAX_LEN];
+    strncpy(deleted_name, clients[0].client_name, sizeof(deleted_name) - 1);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_delete_paired_client(deleted_name));
+
+    TEST_ASSERT_FALSE(auth_manager_verify_token(token1));
+    TEST_ASSERT_TRUE(auth_manager_verify_token(token2));
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_get_paired_clients(clients, &count));
+    TEST_ASSERT_EQUAL_UINT8(1, count);
+
+    // Deleting a non-existent client returns ESP_ERR_NOT_FOUND
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, auth_manager_delete_paired_client(deleted_name));
+
+    // Delete remaining client
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_delete_paired_client(clients[1].client_name));
+    TEST_ASSERT_FALSE(auth_manager_verify_token(token2));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_get_paired_clients(clients, &count));
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
+// =============================================================================
+// Multi-Equipment Manager & Fail-Fast Recipe Upload Tests
+// =============================================================================
+static ble_outbound_cmd_packet_t s_captured_pkts[32];
+static uint16_t s_captured_pkt_count = 0;
+
+static esp_err_t mock_enqueue_ble_pkt(const ble_outbound_cmd_packet_t *pkt) {
+    if (s_captured_pkt_count >= 32) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_captured_pkts[s_captured_pkt_count++] = *pkt;
+    return ESP_OK;
+}
+
+void test_equipment_manager_fail_fast_when_disconnected(void) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_init(NULL));
+    equipment_manager_set_enqueue_override(mock_enqueue_ble_pkt);
+    s_captured_pkt_count = 0;
+
+    unified_recipe_t recipe;
+    memset(&recipe, 0, sizeof(recipe));
+    strncpy(recipe.name, "Offline IPA", sizeof(recipe.name) - 1);
+    recipe.boil_time_min = 60;
+    recipe.mash_step_count = 1;
+    recipe.mash_steps[0].temp_c = 65.0f;
+    recipe.mash_steps[0].duration_min = 60;
+
+    uint8_t resolved_mac[6] = {0};
+    // No BLE device connected -> must fail fast with ESP_ERR_NOT_FOUND and queue 0 packets
+    esp_err_t err = equipment_manager_dispatch_recipe(NULL, EQUIPMENT_TYPE_BOILER, "req-offline", &recipe, resolved_mac);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, err);
+    TEST_ASSERT_EQUAL_UINT16(0, s_captured_pkt_count);
+}
+
+void test_equipment_manager_multi_device_recipe_dispatch(void) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_init(NULL));
+    equipment_manager_set_enqueue_override(mock_enqueue_ble_pkt);
+
+    // Connect 1 Boiler (Grainfather G30) and 1 Fermenter simultaneously
+    uint8_t g30_mac[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x22};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 1, -58));
+
+    uint8_t ferm_mac[6] = {0xAA, 0xBB, 0xCC, 0x11, 0x22, 0x33};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        ferm_mac, true, EQUIPMENT_TYPE_FERMENTER, "Generic BLE Fermenter", 2, -64));
+
+    // 1. Dispatch Boiler Recipe (2 mash steps, 2 boil additions -> 4 + 2 + 2 = 8 BLE packets)
+    s_captured_pkt_count = 0;
+    unified_recipe_t recipe;
+    memset(&recipe, 0, sizeof(recipe));
+    strncpy(recipe.name, "West Coast IPA", sizeof(recipe.name) - 1);
+    recipe.boil_time_min = 60;
+    recipe.mash_water_l = 16.5f;
+    recipe.sparge_water_l = 13.5f;
+    recipe.mash_step_count = 2;
+    recipe.mash_steps[0].temp_c = 65.0f;
+    recipe.mash_steps[0].duration_min = 60;
+    recipe.mash_steps[1].temp_c = 75.0f;
+    recipe.mash_steps[1].duration_min = 10;
+    recipe.boil_addition_count = 2;
+    recipe.boil_additions_min[0] = 60;
+    recipe.boil_additions_min[1] = 15;
+    recipe.fermentation_step_count = 1;
+    recipe.fermentation_steps[0].temp_c = 19.5f;
+    recipe.fermentation_steps[0].duration_hours = 240;
+    recipe.target_og_sg = 1.062f;
+
+    uint8_t resolved_mac[6] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_dispatch_recipe(g30_mac, EQUIPMENT_TYPE_BOILER, "req-g30-1", &recipe, resolved_mac));
+    TEST_ASSERT_EQUAL_UINT16(8, s_captured_pkt_count);
+    TEST_ASSERT_EQUAL_UINT16(1, s_captured_pkts[0].seq_idx);
+    TEST_ASSERT_EQUAL_UINT16(8, s_captured_pkts[0].seq_total);
+    TEST_ASSERT_EQUAL_UINT16(8, s_captured_pkts[7].seq_idx);
+    TEST_ASSERT_EQUAL_UINT16(8, s_captured_pkts[7].seq_total);
+    TEST_ASSERT_EQUAL_STRING("req-g30-1", s_captured_pkts[7].req_id);
+
+    // 2. Dispatch Fermenter Profile to the connected Fermenter
+    s_captured_pkt_count = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_dispatch_recipe(ferm_mac, EQUIPMENT_TYPE_FERMENTER, "req-ferm-1", &recipe, resolved_mac));
+    TEST_ASSERT_EQUAL_UINT16(1, s_captured_pkt_count);
+    TEST_ASSERT_EQUAL_STRING("F1:19.5:240", s_captured_pkts[0].cmd_bytes);
+
+    // 3. List paired/connected Bluetooth devices as JSON without needing MACs
+    char eq_list_json[1024] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_format_equipment_list_json("C44F331A8B20", "req-list-1", eq_list_json, sizeof(eq_list_json)));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"event\":\"equipment_list\""));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"req_id\":\"req-list-1\""));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"count\":2"));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":1"));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"name\":\"Grainfather G30 Connect\""));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":2"));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"name\":\"Generic BLE Fermenter\""));
+
+    // 4. Target equipment by 1-based slot index (slot 2 -> Fermenter) without knowing MAC address
+    s_captured_pkt_count = 0;
+    memset(resolved_mac, 0, sizeof(resolved_mac));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_dispatch_recipe_to_slot(2, NULL, EQUIPMENT_TYPE_UNKNOWN, "req-slot-2", &recipe, resolved_mac));
+    TEST_ASSERT_EQUAL_UINT16(1, s_captured_pkt_count);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(ferm_mac, resolved_mac, 6);
+
+    // 5. Disconnect G30 and verify subsequent upload fails fast with ESP_ERR_NOT_FOUND
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac, false, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 1, -58));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, equipment_manager_dispatch_recipe(g30_mac, EQUIPMENT_TYPE_BOILER, "req-g30-2", &recipe, resolved_mac));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, equipment_manager_dispatch_recipe_to_slot(1, NULL, EQUIPMENT_TYPE_BOILER, "req-slot-1-offline", &recipe, resolved_mac));
+}
+
+void test_equipment_manager_unique_names_and_power_cycle_persistence(void) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_init(NULL));
+    equipment_manager_set_enqueue_override(mock_enqueue_ble_pkt);
+
+    // Pair two identical "Grainfather G30 Connect" boilers with different MAC addresses
+    uint8_t g30_mac_1[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x22};
+    uint8_t g30_mac_2[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x23};
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac_1, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 1, -55));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac_2, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 2, -62));
+
+    equipment_slot_t slot1, slot2;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(0, &slot1));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(1, &slot2));
+
+    // Verify names are guaranteed unique across all paired slots
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", slot1.name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect-8B23", slot2.name);
+    TEST_ASSERT_TRUE(slot1.paired);
+    TEST_ASSERT_TRUE(slot2.paired);
+
+    // Verify targeting the second boiler specifically by its unique target_name
+    s_captured_pkt_count = 0;
+    unified_command_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = CMD_ACTION_SET_PUMP;
+    cmd.params.pump_state = true;
+    strncpy(cmd.target_name, "Grainfather G30 Connect-8B23", sizeof(cmd.target_name) - 1);
+
+    uint8_t resolved_mac[6] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_dispatch_command(&cmd, resolved_mac));
+    TEST_ASSERT_EQUAL_UINT16(1, s_captured_pkt_count);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(g30_mac_2, resolved_mac, 6);
+
+    // Simulate power-cycling Boiler 2 (disconnect -> stays in paired list with connected: false, then reconnects to same slot & unique name)
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac_2, false, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 2, -62));
+
+    char eq_list_json[1024] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_format_equipment_list_json("C44F331A8B20", NULL, eq_list_json, sizeof(eq_list_json)));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"count\":2"));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":2,\"paired\":true,\"connected\":false,\"name\":\"Grainfather G30 Connect-8B23\""));
+
+    // Power Boiler 2 back on -> reconnects into slot 2 and retains its unique name
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac_2, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 5, -59));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(1, &slot2));
+    TEST_ASSERT_TRUE(slot2.connected);
+    TEST_ASSERT_TRUE(slot2.paired);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect-8B23", slot2.name);
+
+    // Explicit unpair removes it from the slot
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_unpair_device(g30_mac_2));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(1, &slot2));
+    TEST_ASSERT_FALSE(slot2.paired);
+    TEST_ASSERT_FALSE(slot2.connected);
+}
+
+// =============================================================================
 // Test Runner Entrypoint
 // =============================================================================
 int main(int argc, char **argv) {
@@ -947,6 +1269,15 @@ int main(int argc, char **argv) {
     RUN_TEST(test_g30_stage_name_mapping);
     RUN_TEST(test_g30_parse_timer_real_protocol_minutes_and_seconds);
     RUN_TEST(test_g30_master_recipe_full_lifecycle);
+
+    // Pairing, Token Auth, MQTT HMAC-SHA256 & Multi-Equipment Manager tests
+    RUN_TEST(test_auth_pin_pairing_and_token_verification);
+    RUN_TEST(test_auth_code_free_push_button_pairing_and_discovery_beacon);
+    RUN_TEST(test_auth_hmac_sha256_and_mqtt_command_signing);
+    RUN_TEST(test_auth_unique_client_names_and_deletion);
+    RUN_TEST(test_equipment_manager_fail_fast_when_disconnected);
+    RUN_TEST(test_equipment_manager_multi_device_recipe_dispatch);
+    RUN_TEST(test_equipment_manager_unique_names_and_power_cycle_persistence);
 
     return UNITY_END();
 }
