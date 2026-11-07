@@ -25,7 +25,7 @@ static mqtt_conn_status_cb_t s_conn_callback = NULL;
 static SemaphoreHandle_t s_mqtt_mutex = NULL;
 
 static char s_gateway_id[GATEWAY_ID_MAX_LEN] = {0};
-static char s_lwt_topic[128] = {0};
+static char s_lwt_topic[160] = {0};
 static char s_client_id[32] = {0};
 static char s_default_username[32] = {0};
 
@@ -55,6 +55,18 @@ static void ensure_gateway_id_initialized(void) {
     }
 }
 
+// Compute effective topic prefix incorporating paired mqtt_topic_key when paired
+static void get_effective_prefix(const brewlink_config_t *cfg, char *out_prefix, size_t max_len) {
+    const char *base = (cfg->mqtt_topic_prefix[0] != '\0') ? cfg->mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+    if (cfg->client_paired && cfg->mqtt_topic_key[0] != '\0') {
+        size_t base_len = strlen(base);
+        bool has_slash = (base_len > 0 && base[base_len - 1] == '/');
+        snprintf(out_prefix, max_len, "%s%s%s/", base, has_slash ? "" : "/", cfg->mqtt_topic_key);
+    } else {
+        snprintf(out_prefix, max_len, "%s", base);
+    }
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
     esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
 
@@ -65,17 +77,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
             brewlink_config_t cfg;
             config_store_get(&cfg);
-            const char *prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+            const char *base_prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+            char eff_prefix[128];
+            get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
 
-            // Subscribe to equipment commands: brewlink/{gw_id}/equipment/+/cmd
-            char sub_topic[160];
-            snprintf(sub_topic, sizeof(sub_topic), "%s%s/equipment/+/cmd", prefix, s_gateway_id);
+            char sub_topic[192];
+            // Subscribe to paired topic namespace: brewlink/{topic_key}/{gw_id}/equipment/+/cmd
+            snprintf(sub_topic, sizeof(sub_topic), "%s%s/equipment/+/cmd", eff_prefix, s_gateway_id);
             esp_mqtt_client_subscribe(s_mqtt_client, sub_topic, MQTT_QOS_COMMAND);
             ESP_LOGI(TAG, "Subscribed to: %s", sub_topic);
 
-            // Subscribe to gateway level commands: brewlink/{gw_id}/cmd
-            snprintf(sub_topic, sizeof(sub_topic), "%s%s/cmd", prefix, s_gateway_id);
+            snprintf(sub_topic, sizeof(sub_topic), "%s%s/cmd", eff_prefix, s_gateway_id);
             esp_mqtt_client_subscribe(s_mqtt_client, sub_topic, MQTT_QOS_COMMAND);
+
+            // Also subscribe to base prefix if different (HMAC verification still protects /cmd)
+            if (strcmp(eff_prefix, base_prefix) != 0) {
+                snprintf(sub_topic, sizeof(sub_topic), "%s%s/equipment/+/cmd", base_prefix, s_gateway_id);
+                esp_mqtt_client_subscribe(s_mqtt_client, sub_topic, MQTT_QOS_COMMAND);
+                snprintf(sub_topic, sizeof(sub_topic), "%s%s/cmd", base_prefix, s_gateway_id);
+                esp_mqtt_client_subscribe(s_mqtt_client, sub_topic, MQTT_QOS_COMMAND);
+            }
 
             // Backward compatibility subscribe
             esp_mqtt_client_subscribe(s_mqtt_client, MQTT_TOPIC_CMD_WILDCARD, MQTT_QOS_COMMAND);
@@ -96,7 +117,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             break;
 
         case MQTT_EVENT_DATA: {
-            char topic_buf[160];
+            char topic_buf[192];
             int topic_len = event->topic_len < (int)(sizeof(topic_buf) - 1) ? event->topic_len : (int)(sizeof(topic_buf) - 1);
             memcpy(topic_buf, event->topic, topic_len);
             topic_buf[topic_len] = '\0';
@@ -124,8 +145,10 @@ static esp_err_t create_client_instance(const brewlink_config_t *cfg) {
 
     ensure_gateway_id_initialized();
 
-    const char *prefix = (cfg->mqtt_topic_prefix[0] != '\0') ? cfg->mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
-    snprintf(s_lwt_topic, sizeof(s_lwt_topic), "%s%s%s", prefix, s_gateway_id, MQTT_TOPIC_STATUS_SUFFIX);
+    char eff_prefix[128];
+    get_effective_prefix(cfg, eff_prefix, sizeof(eff_prefix));
+
+    snprintf(s_lwt_topic, sizeof(s_lwt_topic), "%s%s%s", eff_prefix, s_gateway_id, MQTT_TOPIC_STATUS_SUFFIX);
     snprintf(s_client_id, sizeof(s_client_id), "brewlink_%s", s_gateway_id);
     snprintf(s_default_username, sizeof(s_default_username), "brewlink_%s", s_gateway_id);
 
@@ -297,10 +320,11 @@ esp_err_t mqtt_manager_publish_gateway_status(const char *status_json) {
     ensure_gateway_id_initialized();
     brewlink_config_t cfg;
     config_store_get(&cfg);
-    const char *prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
 
-    char topic[128];
-    snprintf(topic, sizeof(topic), "%s%s%s", prefix, s_gateway_id, MQTT_TOPIC_STATUS_SUFFIX);
+    char topic[192];
+    snprintf(topic, sizeof(topic), "%s%s%s", eff_prefix, s_gateway_id, MQTT_TOPIC_STATUS_SUFFIX);
     return mqtt_manager_publish(topic, status_json, 0, MQTT_QOS_STATUS, 1);
 }
 
@@ -313,13 +337,28 @@ esp_err_t mqtt_manager_publish_equipment_announce(const char *eq_mac, const char
 
     brewlink_config_t cfg;
     config_store_get(&cfg);
-    const char *prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
 
-    char topic[160];
+    char topic[192];
     snprintf(topic, sizeof(topic), "%s%s/equipment/%s%s",
-             prefix, s_gateway_id, clean_mac, MQTT_TOPIC_ANNOUNCE_SUFFIX);
+             eff_prefix, s_gateway_id, clean_mac, MQTT_TOPIC_ANNOUNCE_SUFFIX);
 
     return mqtt_manager_publish(topic, manifest_json, 0, MQTT_QOS_ANNOUNCE, 1);
+}
+
+esp_err_t mqtt_manager_publish_equipment_list(const char *list_json) {
+    if (list_json == NULL) return ESP_ERR_INVALID_ARG;
+
+    ensure_gateway_id_initialized();
+    brewlink_config_t cfg;
+    config_store_get(&cfg);
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
+
+    char topic[192];
+    snprintf(topic, sizeof(topic), "%s%s/equipment", eff_prefix, s_gateway_id);
+    return mqtt_manager_publish(topic, list_json, 0, MQTT_QOS_ANNOUNCE, 1);
 }
 
 esp_err_t mqtt_manager_publish_equipment_telemetry(const char *eq_mac, const char *telemetry_json) {
@@ -331,11 +370,12 @@ esp_err_t mqtt_manager_publish_equipment_telemetry(const char *eq_mac, const cha
 
     brewlink_config_t cfg;
     config_store_get(&cfg);
-    const char *prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
 
-    char topic[160];
+    char topic[192];
     snprintf(topic, sizeof(topic), "%s%s/equipment/%s%s",
-             prefix, s_gateway_id, clean_mac, MQTT_TOPIC_TELEMETRY_SUFFIX);
+             eff_prefix, s_gateway_id, clean_mac, MQTT_TOPIC_TELEMETRY_SUFFIX);
 
     return mqtt_manager_publish(topic, telemetry_json, 0, MQTT_QOS_TELEMETRY, 0);
 }
@@ -349,11 +389,12 @@ esp_err_t mqtt_manager_publish_equipment_snapshot(const char *eq_mac, const char
 
     brewlink_config_t cfg;
     config_store_get(&cfg);
-    const char *prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
 
-    char topic[160];
+    char topic[192];
     snprintf(topic, sizeof(topic), "%s%s/equipment/%s%s",
-             prefix, s_gateway_id, clean_mac, MQTT_TOPIC_SNAPSHOT_SUFFIX);
+             eff_prefix, s_gateway_id, clean_mac, MQTT_TOPIC_SNAPSHOT_SUFFIX);
 
     return mqtt_manager_publish(topic, snapshot_json, 0, MQTT_QOS_SNAPSHOT, 0);
 }
@@ -375,15 +416,16 @@ esp_err_t mqtt_manager_publish_cmd_ack(const char *eq_mac, const char *req_id,
 
     brewlink_config_t cfg;
     config_store_get(&cfg);
-    const char *prefix = (cfg.mqtt_topic_prefix[0] != '\0') ? cfg.mqtt_topic_prefix : MQTT_TOPIC_GATEWAY_PREFIX;
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
 
-    char topic[160];
+    char topic[192];
     snprintf(topic, sizeof(topic), "%s%s/equipment/%s%s",
-             prefix, s_gateway_id, clean_mac, MQTT_TOPIC_CMD_ACK_SUFFIX);
+             eff_prefix, s_gateway_id, clean_mac, MQTT_TOPIC_CMD_ACK_SUFFIX);
 
     char payload[256];
     snprintf(payload, sizeof(payload),
-             "{\"req_id\":\"%s\",\"mac\":\"%s\",\"action\":\"%s\",\"status\":\"%s\","
+             "{\"event\":\"cmd_ack\",\"req_id\":\"%s\",\"mac\":\"%s\",\"action\":\"%s\",\"status\":\"%s\","
              "\"error_code\":%d,\"duration_ms\":%lu,\"timestamp_ms\":%lu}",
              rid, clean_mac, action, status,
              error_code, (unsigned long)duration_ms, (unsigned long)esp_log_timestamp());

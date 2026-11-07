@@ -28,6 +28,18 @@ extern "C" {
 typedef void (*ble_peer_event_cb_t)(const ble_peer_device_t *peer, bool connected);
 
 /**
+ * @brief Callback for outbound BLE command or multi-packet recipe sequence completion
+ * @param mac 6-byte target equipment MAC address
+ * @param req_id Correlation request ID
+ * @param action Command action name (e.g. "load_recipe", "set_pump")
+ * @param status ESP_OK when final packet in sequence is written, or ESP_ERR_INVALID_STATE if aborted mid-transfer
+ */
+typedef void (*ble_cmd_seq_complete_cb_t)(const uint8_t mac[6],
+                                          const char *req_id,
+                                          const char *action,
+                                          esp_err_t status);
+
+/**
  * @brief Initialize NimBLE Central host and register queues
  * @param telemetry_queue Queue for inbound telemetry packets
  * @param cmd_queue Queue for outbound commands
@@ -43,6 +55,13 @@ esp_err_t ble_manager_init(QueueHandle_t telemetry_queue, QueueHandle_t cmd_queu
 esp_err_t ble_manager_register_peer_cb(ble_peer_event_cb_t cb);
 
 /**
+ * @brief Register callback for outbound command sequence completion / abort events
+ * @param cb Callback function
+ * @return ESP_OK on success
+ */
+esp_err_t ble_manager_register_seq_cb(ble_cmd_seq_complete_cb_t cb);
+
+/**
  * @brief Start active BLE discovery scan
  * @param duration_sec Scan duration in seconds (0 for continuous default)
  * @return ESP_OK on success, or ESP error code.
@@ -51,7 +70,6 @@ esp_err_t ble_manager_start_scan(uint32_t duration_sec);
 
 /**
  * @brief Stop active BLE scan
- * @param duration_sec Scan duration in seconds (0 for continuous default)
  * @return ESP_OK on success, or ESP error code.
  */
 esp_err_t ble_manager_stop_scan(void);

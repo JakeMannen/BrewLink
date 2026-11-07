@@ -1,7 +1,7 @@
 /**
  * @file main.c
  * @brief BrewLink Firmware Entrypoint
- * @details Multi-Device BLE Central (NimBLE) to WiFi/MQTT Bidirectional Relay with Onboarding Web Server
+ * @details Multi-Device BLE Central (NimBLE) to WiFi/MQTT/WebSocket/HTTP Bidirectional Relay
  */
 
 #include <stdio.h>
@@ -27,6 +27,8 @@
 #include "grainfather_g30.h"
 #include "g30_controller.h"
 #include "config_store.h"
+#include "auth_manager.h"
+#include "equipment_manager.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "ble_manager.h"
@@ -44,7 +46,7 @@ static SemaphoreHandle_t s_g30_state_mutex = NULL;
 // Gateway identifier derived from ESP32 Base MAC
 static char s_gateway_id[GATEWAY_ID_MAX_LEN] = {0};
 
-// Cached unified state for the Grainfather G30
+// Cached unified state for the Grainfather G30 (kept synchronized with equipment_manager)
 static unified_boiler_state_t s_g30_state;
 static unified_boiler_state_t s_prev_state;
 static uint32_t s_last_telemetry_pub_ms = 0;
@@ -68,6 +70,24 @@ static bool parse_hex_mac(const char *str, uint8_t mac[6]) {
     return true;
 }
 
+static const char *equip_type_to_str(equipment_type_t t) {
+    switch (t) {
+        case EQUIPMENT_TYPE_BOILER:        return "boiler";
+        case EQUIPMENT_TYPE_FERMENTER:     return "fermenter";
+        case EQUIPMENT_TYPE_COOLER_HEATER: return "cooler";
+        default:                           return "unknown";
+    }
+}
+
+static equipment_type_t parse_equip_type_str(const char *s) {
+    if (s == NULL) return EQUIPMENT_TYPE_BOILER;
+    if (strcmp(s, "fermenter") == 0) return EQUIPMENT_TYPE_FERMENTER;
+    if (strcmp(s, "cooler") == 0 || strcmp(s, "cooler_heater") == 0 || strcmp(s, "chiller") == 0) {
+        return EQUIPMENT_TYPE_COOLER_HEATER;
+    }
+    return EQUIPMENT_TYPE_BOILER;
+}
+
 // -----------------------------------------------------------------------------
 // Equipment Capability Manifest & Announcements
 // -----------------------------------------------------------------------------
@@ -79,48 +99,135 @@ static void publish_equipment_manifest(const ble_peer_device_t *peer, bool conne
              peer->addr[0], peer->addr[1], peer->addr[2],
              peer->addr[3], peer->addr[4], peer->addr[5]);
 
+    const char *eq_type_str = equip_type_to_str(peer->equipment_type);
+
     char manifest[768];
     if (connected) {
         snprintf(manifest, sizeof(manifest),
                  "{\"event\":\"connected\",\"gateway_id\":\"%s\",\"mac\":\"%s\","
-                 "\"equipment_type\":\"boiler\",\"model\":\"%s\",\"slot\":%d,\"rssi\":%d,"
+                 "\"equipment_type\":\"%s\",\"model\":\"%s\",\"slot\":%d,\"rssi\":%d,"
                  "\"capabilities\":{\"temperature_read\":true,\"temperature_set\":true,"
-                 "\"pump_control\":true,\"heat_control\":true,\"power_level_control\":true,"
-                 "\"timer_control\":true,\"recipe_upload\":true,\"interaction_prompt\":true},"
-                 "\"writable_ranges\":{\"target_temp_min_c\":20.0,\"target_temp_max_c\":100.0,"
+                 "\"pump_control\":%s,\"heat_control\":%s,\"power_level_control\":%s,"
+                 "\"timer_control\":%s,\"recipe_upload\":true,\"interaction_prompt\":%s},"
+                 "\"writable_ranges\":{\"target_temp_min_c\":%.1f,\"target_temp_max_c\":%.1f,"
                  "\"power_pct_min\":0,\"power_pct_max\":100},"
                  "\"timestamp_ms\":%lu}",
-                 s_gateway_id, mac_str,
+                 s_gateway_id, mac_str, eq_type_str,
                  peer->device_name[0] ? peer->device_name : "Grainfather G30 Connect",
                  peer->conn_handle, peer->rssi,
+                 (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? "true" : "false",
+                 (peer->equipment_type != EQUIPMENT_TYPE_FERMENTER) ? "true" : "false",
+                 (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? "true" : "false",
+                 (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? "true" : "false",
+                 (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? "true" : "false",
+                 (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? 20.0f : -5.0f,
+                 (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? 100.0f : 40.0f,
                  (unsigned long)esp_log_timestamp());
     } else {
         snprintf(manifest, sizeof(manifest),
                  "{\"event\":\"disconnected\",\"gateway_id\":\"%s\",\"mac\":\"%s\","
-                 "\"timestamp_ms\":%lu}",
-                 s_gateway_id, mac_str,
+                 "\"equipment_type\":\"%s\",\"timestamp_ms\":%lu}",
+                 s_gateway_id, mac_str, eq_type_str,
                  (unsigned long)esp_log_timestamp());
     }
 
     if (mqtt_manager_is_connected()) {
         mqtt_manager_publish_equipment_announce(mac_str, manifest);
     }
+    web_server_ws_broadcast(manifest);
 }
 
 // -----------------------------------------------------------------------------
-// BLE Peer Lifecycle Callback
+// BLE Peer Lifecycle & Sequence Completion Callbacks
 // -----------------------------------------------------------------------------
+static void broadcast_equipment_list(const char *req_id) {
+    char list_json[1024];
+    if (equipment_manager_format_equipment_list_json(s_gateway_id,
+                                                     req_id,
+                                                     list_json,
+                                                     sizeof(list_json)) == ESP_OK) {
+        if (mqtt_manager_is_connected()) {
+            mqtt_manager_publish_equipment_list(list_json);
+        }
+        web_server_ws_broadcast(list_json);
+    }
+}
+
 static void on_ble_peer_lifecycle_event(const ble_peer_device_t *peer, bool connected) {
     ESP_LOGI(TAG, "BLE peer lifecycle event: %02X:%02X:%02X:%02X:%02X:%02X (%s) -> %s",
              peer->addr[0], peer->addr[1], peer->addr[2],
              peer->addr[3], peer->addr[4], peer->addr[5],
              peer->device_name, connected ? "CONNECTED" : "DISCONNECTED");
 
+    const char *model_str = peer->device_name[0] ? peer->device_name : "Grainfather G30 Connect";
+    equipment_manager_on_peer_event(peer->addr,
+                                    connected,
+                                    peer->equipment_type,
+                                    model_str,
+                                    peer->conn_handle,
+                                    peer->rssi);
+
+    if (connected) {
+        // Persist paired device and its guaranteed unique name in NVS for automatic power-on reconnection
+        char unique_name[32] = {0};
+        strncpy(unique_name, model_str, sizeof(unique_name) - 1);
+        for (uint8_t i = 0; i < BLE_MAX_SIMULTANEOUS_CONNECTIONS; i++) {
+            equipment_slot_t slot;
+            if (equipment_manager_get_slot(i, &slot) == ESP_OK &&
+                (slot.paired || slot.connected) &&
+                memcmp(slot.mac, peer->addr, 6) == 0) {
+                if (slot.name[0] != '\0') {
+                    strncpy(unique_name, slot.name, sizeof(unique_name) - 1);
+                }
+                break;
+            }
+        }
+        config_store_save_paired_ble(peer->addr,
+                                     peer->addr_type,
+                                     (uint8_t)peer->equipment_type,
+                                     unique_name,
+                                     model_str);
+    }
+
     publish_equipment_manifest(peer, connected);
+    broadcast_equipment_list(NULL);
+}
+
+static void on_ble_cmd_seq_complete(const uint8_t mac[6],
+                                    const char *req_id,
+                                    const char *action,
+                                    esp_err_t result) {
+    char mac_str[13] = "000000000000";
+    if (mac != NULL) {
+        snprintf(mac_str, sizeof(mac_str), "%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+
+    const char *status_str = (result == ESP_OK) ? "success" : "error";
+
+    if (mqtt_manager_is_connected()) {
+        mqtt_manager_publish_cmd_ack(mac_str,
+                                     req_id ? req_id : "req-0",
+                                     action ? action : "cmd",
+                                     status_str,
+                                     (int)result,
+                                     0);
+    }
+
+    char ws_ack[320];
+    snprintf(ws_ack, sizeof(ws_ack),
+             "{\"event\":\"cmd_ack\",\"mac\":\"%s\",\"req_id\":\"%s\","
+             "\"action\":\"%s\",\"status\":\"%s\",\"error_code\":%d}",
+             mac_str,
+             req_id ? req_id : "req-0",
+             action ? action : "cmd",
+             status_str,
+             (int)result);
+    web_server_ws_broadcast(ws_ack);
 }
 
 // -----------------------------------------------------------------------------
-// G30 Controller Public Bridge API
+// G30 Controller Public Bridge API (Delegates to Equipment Manager)
 // -----------------------------------------------------------------------------
 esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
                                    bool *out_connected,
@@ -130,12 +237,37 @@ esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
         return ESP_ERR_INVALID_ARG;
     }
 
-    ble_peer_device_t peers[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
-    uint8_t count = 0;
+    equipment_slot_t slot;
+    memset(&slot, 0, sizeof(slot));
     bool found = false;
 
-    if (ble_manager_get_peers(peers, BLE_MAX_SIMULTANEOUS_CONNECTIONS, &count) == ESP_OK) {
-        for (uint8_t i = 0; i < count; i++) {
+    ble_peer_device_t peers[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
+    uint8_t p_count = 0;
+    ble_manager_get_peers(peers, BLE_MAX_SIMULTANEOUS_CONNECTIONS, &p_count);
+
+    if (equipment_manager_find_connected(NULL, EQUIPMENT_TYPE_BOILER, &slot) == ESP_OK) {
+        found = true;
+        int8_t live_rssi = slot.rssi;
+        for (uint8_t i = 0; i < p_count; i++) {
+            if (peers[i].connected && memcmp(peers[i].addr, slot.mac, 6) == 0 && peers[i].rssi != 0) {
+                live_rssi = peers[i].rssi;
+                break;
+            }
+        }
+        if (out_mac != NULL) {
+            memcpy(out_mac, slot.mac, 6);
+        }
+        if (out_rssi != NULL) {
+            *out_rssi = live_rssi;
+        }
+        if (out_state != NULL) {
+            *out_state = slot.state.boiler;
+        }
+    }
+
+    // Fallback to ble_manager peer list if slot not yet populated
+    if (!found) {
+        for (uint8_t i = 0; i < p_count; i++) {
             if (peers[i].connected && (peers[i].equipment_type == EQUIPMENT_TYPE_BOILER ||
                 strncmp(peers[i].device_name, "Grain", 5) == 0)) {
                 found = true;
@@ -145,22 +277,32 @@ esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
                 if (out_rssi != NULL) {
                     *out_rssi = peers[i].rssi;
                 }
+                const char *m_str = peers[i].device_name[0] ? peers[i].device_name : "Grainfather G30 Connect";
+                equipment_manager_on_peer_event(peers[i].addr,
+                                                true,
+                                                EQUIPMENT_TYPE_BOILER,
+                                                m_str,
+                                                peers[i].conn_handle,
+                                                peers[i].rssi);
+                config_store_save_paired_ble(peers[i].addr,
+                                             peers[i].addr_type,
+                                             (uint8_t)EQUIPMENT_TYPE_BOILER,
+                                             m_str,
+                                             m_str);
                 break;
+            }
+        }
+        if (out_state != NULL) {
+            if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                *out_state = s_g30_state;
+                xSemaphoreGive(s_g30_state_mutex);
+            } else {
+                *out_state = s_g30_state;
             }
         }
     }
 
     *out_connected = found;
-
-    if (out_state != NULL) {
-        if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            *out_state = s_g30_state;
-            xSemaphoreGive(s_g30_state_mutex);
-        } else {
-            *out_state = s_g30_state;
-        }
-    }
-
     return ESP_OK;
 }
 
@@ -169,197 +311,35 @@ esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    unified_boiler_state_t cur_state;
-    memset(&cur_state, 0, sizeof(cur_state));
-    bool connected = false;
-    uint8_t target_mac[6] = {0};
-    int8_t rssi = 0;
-    g30_controller_get_state(&cur_state, &connected, target_mac, &rssi);
-    if (!connected) {
-        ESP_LOGW(TAG, "Cannot dispatch G30 command: controller not connected");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    // When a recipe process is ongoing (auto_mode == true), the G30 hardware controller is master.
-    // BrewLink must never send its own timers or temperature steps during an active recipe.
-    if (cur_state.auto_mode &&
-        (cmd->action == CMD_ACTION_SET_TIMER ||
-         cmd->action == CMD_ACTION_CANCEL_TIMER ||
-         cmd->action == CMD_ACTION_SET_TARGET_TEMP)) {
-        ESP_LOGW(TAG, "Rejected command action %d: G30 controller is master while recipe is ongoing", cmd->action);
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    unified_command_t effective_cmd = *cmd;
-    if (effective_cmd.action == CMD_ACTION_ACK_INTERACTION) {
-        if (cur_state.interaction.code == 5) {
-            effective_cmd.action = CMD_ACTION_DISMISS_ALERT;
-        }
-    }
-
-    ble_outbound_cmd_packet_t outbound_pkt;
-    memset(&outbound_pkt, 0, sizeof(outbound_pkt));
-
-    bool has_mac = false;
-    for (int i = 0; i < 6; i++) {
-        if (effective_cmd.target_mac[i] != 0) {
-            has_mac = true;
-            break;
-        }
-    }
-    if (has_mac) {
-        memcpy(outbound_pkt.mac, effective_cmd.target_mac, 6);
-    } else {
-        memcpy(outbound_pkt.mac, target_mac, 6);
-    }
-
-    outbound_pkt.conn_handle = 0;
-    outbound_pkt.len = G30_COMMAND_LEN;
-    outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
-
-    esp_err_t enc_err = g30_encode_command(&effective_cmd, outbound_pkt.cmd_bytes);
-    if (enc_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to encode G30 command action %d: 0x%x", effective_cmd.action, enc_err);
-        return enc_err;
-    }
-
-    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGE(TAG, "s_ble_cmd_queue full; command dropped");
-        return ESP_ERR_NO_MEM;
-    }
-
-    ESP_LOGI(TAG, "Enqueued G30 BLE command: '%.*s'", G30_COMMAND_LEN, outbound_pkt.cmd_bytes);
-    return ESP_OK;
+    uint8_t resolved_mac[6] = {0};
+    return equipment_manager_dispatch_command(cmd, resolved_mac);
 }
 
 esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
     if (recipe == NULL || s_ble_cmd_queue == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (recipe->mash_step_count == 0 || recipe->mash_step_count > MAX_MASH_STEPS) {
-        ESP_LOGE(TAG, "Invalid mash_step_count: %u (max %u)", recipe->mash_step_count, MAX_MASH_STEPS);
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (recipe->boil_addition_count > MAX_BOIL_ADDITIONS) {
-        ESP_LOGE(TAG, "Invalid boil_addition_count: %u (max %u)", recipe->boil_addition_count, MAX_BOIL_ADDITIONS);
-        return ESP_ERR_INVALID_ARG;
-    }
 
-    bool connected = false;
-    uint8_t target_mac[6] = {0};
-    int8_t rssi = 0;
-    g30_controller_get_state(NULL, &connected, target_mac, &rssi);
-    if (!connected) {
-        ESP_LOGW(TAG, "Cannot dispatch recipe: G30 controller not connected");
-        return ESP_ERR_NOT_FOUND;
+    esp_err_t err = equipment_manager_dispatch_recipe(NULL,
+                                                      EQUIPMENT_TYPE_BOILER,
+                                                      "web-recipe",
+                                                      recipe,
+                                                      NULL);
+    if (err == ESP_OK) {
+        // Sync cached s_g30_state from equipment_manager
+        bool connected = false;
+        g30_controller_get_state(&s_g30_state, &connected, NULL, NULL);
     }
-
-    // Update local state immediately so web status reflects recipe start prompt
-    if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        s_g30_state.auto_mode = true;
-        s_g30_state.stage.step_index = 1;
-        s_g30_state.heat_active = false;
-        s_g30_state.ramp_active = false;
-        s_g30_state.timer.active = false;
-        s_g30_state.timer.paused = false;
-        s_g30_state.timer.remaining_seconds = 0;
-        s_g30_state.timer.total_seconds = 0;
-        if (recipe->mash_step_count > 0) {
-            s_g30_state.target_temp_c = recipe->mash_steps[0].temp_c;
-        }
-        s_g30_state.interaction.required = true;
-        s_g30_state.interaction.code = 1;
-        if (recipe->mash_water_l > 0.0f) {
-            snprintf(s_g30_state.interaction.message, sizeof(s_g30_state.interaction.message),
-                     "Add %.1fL water & Press SET to start heating", recipe->mash_water_l);
-        } else {
-            strncpy(s_g30_state.interaction.message, "Add mash water & Press SET to start heating",
-                    sizeof(s_g30_state.interaction.message) - 1);
-        }
-        s_g30_state.interaction.message[sizeof(s_g30_state.interaction.message) - 1] = '\0';
-        strncpy(s_g30_state.stage.step_name, "Add Strike Water", sizeof(s_g30_state.stage.step_name) - 1);
-        s_g30_state.stage.step_name[sizeof(s_g30_state.stage.step_name) - 1] = '\0';
-        xSemaphoreGive(s_g30_state_mutex);
-    }
-
-    ble_outbound_cmd_packet_t outbound_pkt;
-    memset(&outbound_pkt, 0, sizeof(outbound_pkt));
-    memcpy(outbound_pkt.mac, target_mac, 6);
-    outbound_pkt.conn_handle = 0;
-    outbound_pkt.len = G30_COMMAND_LEN;
-    outbound_pkt.delay_after_ms = G30_WRITE_PACING_MS;
-
-    // Line 1: Main Recipe Header (R{boil_min},{mash_steps},{mash_water},{sparge_water},)
-    esp_err_t err = g30_encode_recipe_header(recipe, outbound_pkt.cmd_bytes);
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Line 2: Recipe Configuration Flags (0,1,1,0,0,)
-    err = g30_encode_recipe_flags(outbound_pkt.cmd_bytes);
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Line 3: Recipe Name (sanitized uppercase ASCII, space padded)
-    err = g30_encode_recipe_name(recipe->name, outbound_pkt.cmd_bytes);
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Line 4: Boil Parameters ({hop_stand_min},{boil_addition_count},0,0,)
-    err = g30_encode_recipe_boil_params(recipe->hop_stand_min, recipe->boil_addition_count, outbound_pkt.cmd_bytes);
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Line 5..4+N: Boil Stops in descending order ({time_left_min},)
-    for (int i = 0; i < recipe->boil_addition_count; i++) {
-        err = g30_encode_recipe_boil_stop(recipe->boil_additions_min[i], outbound_pkt.cmd_bytes);
-        if (err != ESP_OK) {
-            return err;
-        }
-        if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    // Line 4+N+1..: Mash Steps in sequence ({temp_c}:{duration_min})
-    for (int i = 0; i < recipe->mash_step_count; i++) {
-        err = g30_encode_recipe_mash_step(&recipe->mash_steps[i], outbound_pkt.cmd_bytes);
-        if (err != ESP_OK) {
-            return err;
-        }
-        if (xQueueSend(s_ble_cmd_queue, &outbound_pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    ESP_LOGI(TAG, "Enqueued complete recipe transfer for '%s' (%u steps, %u additions)",
-             recipe->name, recipe->mash_step_count, recipe->boil_addition_count);
-    return ESP_OK;
+    return err;
 }
 
 // -----------------------------------------------------------------------------
-// Inbound Command Processing (Downstream WiFi/MQTT -> BLE with cmd_ack)
+// Inbound Command Processing (Downstream WiFi/MQTT -> BLE with Auth & cmd_ack)
 // -----------------------------------------------------------------------------
 static void process_inbound_command(const char *topic, const char *payload, int len) {
-    int64_t start_us = esp_timer_get_time();
     ESP_LOGI(TAG, "Inbound MQTT command on [%s]: %.*s", topic, len, payload);
 
-    // Extract target MAC from topic if present (e.g. brewlink/{gw_id}/equipment/{MAC}/cmd)
+    // Extract target MAC from topic if present (e.g. brewlink/.../equipment/{MAC}/cmd)
     char target_mac_str[13] = {0};
     uint8_t target_mac[6] = {0};
     bool mac_resolved = false;
@@ -405,11 +385,63 @@ static void process_inbound_command(const char *topic, const char *payload, int 
         return;
     }
     const char *action_str = action_item->valuestring;
+
+    // Verify MQTT command signature or token (Option 1 security)
+    cJSON *ts_item = cJSON_GetObjectItem(root, "timestamp");
+    cJSON *sig_item = cJSON_GetObjectItem(root, "sig");
+    cJSON *tok_item = cJSON_GetObjectItem(root, "token");
+    uint32_t ts_val = (ts_item && cJSON_IsNumber(ts_item)) ? (uint32_t)ts_item->valuedouble : 0;
+    const char *sig_str = (sig_item && cJSON_IsString(sig_item)) ? sig_item->valuestring : NULL;
+    const char *tok_str = (tok_item && cJSON_IsString(tok_item)) ? tok_item->valuestring : NULL;
+
+    if (!auth_manager_verify_mqtt_command(req_id, action_str, ts_val, sig_str, tok_str)) {
+        ESP_LOGW(TAG, "Rejected unauthorized MQTT command '%s' (req_id=%s)", action_str, req_id);
+        mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "unauthorized", 401, 0);
+        cJSON_Delete(root);
+        return;
+    }
+
+    // Optional target_mac and equipment_type in payload
+    cJSON *mac_item = cJSON_GetObjectItem(root, "target_mac");
+    if (!mac_resolved && mac_item && cJSON_IsString(mac_item)) {
+        mac_resolved = parse_hex_mac(mac_item->valuestring, target_mac);
+        if (mac_resolved) {
+            snprintf(target_mac_str, sizeof(target_mac_str), "%02X%02X%02X%02X%02X%02X",
+                     target_mac[0], target_mac[1], target_mac[2],
+                     target_mac[3], target_mac[4], target_mac[5]);
+        }
+    }
+
+    cJSON *eq_type_item = cJSON_GetObjectItem(root, "equipment_type");
+    equipment_type_t eq_type = parse_equip_type_str(
+        (eq_type_item && cJSON_IsString(eq_type_item)) ? eq_type_item->valuestring : NULL);
+
     cJSON *params = cJSON_GetObjectItem(root, "params");
+
+    if (strcmp(action_str, "list_equipment") == 0) {
+        broadcast_equipment_list(req_id);
+        mqtt_manager_publish_cmd_ack("GATEWAY", req_id, action_str, "success", 0, 0);
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON *slot_item = params ? cJSON_GetObjectItem(params, "slot") : NULL;
+    if (slot_item == NULL) slot_item = cJSON_GetObjectItem(root, "slot");
+    uint8_t target_slot = (slot_item && cJSON_IsNumber(slot_item) && slot_item->valueint >= 1)
+                          ? (uint8_t)slot_item->valueint : 0;
+
+    cJSON *tname_item = params ? cJSON_GetObjectItem(params, "target_name") : NULL;
+    if (tname_item == NULL) tname_item = cJSON_GetObjectItem(root, "target_name");
+    if (tname_item == NULL && params) tname_item = cJSON_GetObjectItem(params, "equipment_name");
+    if (tname_item == NULL) tname_item = cJSON_GetObjectItem(root, "equipment_name");
 
     unified_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.equipment_type = EQUIPMENT_TYPE_BOILER;
+    cmd.equipment_type = eq_type;
+    cmd.target_slot = target_slot;
+    if (tname_item && cJSON_IsString(tname_item)) {
+        strncpy(cmd.target_name, tname_item->valuestring, sizeof(cmd.target_name) - 1);
+    }
     strncpy(cmd.req_id, req_id, sizeof(cmd.req_id) - 1);
     if (mac_resolved) {
         memcpy(cmd.target_mac, target_mac, 6);
@@ -470,6 +502,9 @@ static void process_inbound_command(const char *topic, const char *payload, int 
         handled = true;
 
         cJSON *rec = params ? cJSON_GetObjectItem(params, "recipe") : NULL;
+        if (!rec && params) {
+            rec = params;
+        }
         if (rec) {
             cJSON *name = cJSON_GetObjectItem(rec, "name");
             cJSON *boil_time = cJSON_GetObjectItem(rec, "boil_time_min");
@@ -509,35 +544,59 @@ static void process_inbound_command(const char *topic, const char *payload, int 
                     cmd.params.recipe.boil_additions_min[i] = (uint16_t)add_item->valueint;
                 }
             }
+
+            // Fermentation steps array
+            cJSON *ferm_steps = cJSON_GetObjectItem(rec, "fermentation_steps");
+            if (ferm_steps && cJSON_IsArray(ferm_steps)) {
+                int count = cJSON_GetArraySize(ferm_steps);
+                cmd.params.recipe.fermentation_step_count = count > MAX_FERMENTATION_STEPS ? MAX_FERMENTATION_STEPS : count;
+                for (int i = 0; i < cmd.params.recipe.fermentation_step_count; i++) {
+                    cJSON *f_item = cJSON_GetArrayItem(ferm_steps, i);
+                    cJSON *t = cJSON_GetObjectItem(f_item, "temp_c");
+                    cJSON *dh = cJSON_GetObjectItem(f_item, "duration_hours");
+                    cJSON *dd = cJSON_GetObjectItem(f_item, "duration_days");
+                    cmd.params.recipe.fermentation_steps[i].temp_c = t ? (float)t->valuedouble : 20.0f;
+                    if (dh && cJSON_IsNumber(dh)) {
+                        cmd.params.recipe.fermentation_steps[i].duration_hours = (uint16_t)dh->valueint;
+                    } else if (dd && cJSON_IsNumber(dd)) {
+                        cmd.params.recipe.fermentation_steps[i].duration_hours = (uint16_t)(dd->valueint * 24);
+                    } else {
+                        cmd.params.recipe.fermentation_steps[i].duration_hours = 168;
+                    }
+                }
+            }
         }
     }
-
-    cJSON_Delete(root);
 
     if (!handled) {
         ESP_LOGW(TAG, "Unrecognized command action '%s'", action_str);
         mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "rejected", 404, 0);
+        cJSON_Delete(root);
         return;
     }
 
-    // Dispatch via unified G30 controller bridge
+    // Dispatch via equipment_manager; fail-fast error ack is sent immediately if disconnected,
+    // while success ack is emitted by on_ble_cmd_seq_complete once Core 0 writes the BLE packets.
+    uint8_t resolved_mac[6] = {0};
     if (is_recipe) {
-        esp_err_t err = g30_controller_dispatch_recipe(&cmd.params.recipe);
-        uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
-        if (err == ESP_OK) {
-            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "success", 0, duration_ms);
-        } else {
+        esp_err_t err = equipment_manager_dispatch_recipe_ex(target_slot,
+                                                             cmd.target_name[0] ? cmd.target_name : NULL,
+                                                             mac_resolved ? target_mac : NULL,
+                                                             eq_type,
+                                                             req_id,
+                                                             &cmd.params.recipe,
+                                                             resolved_mac);
+        if (err != ESP_OK) {
             mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "error", (int)err, 0);
         }
     } else {
-        esp_err_t err = g30_controller_dispatch_command(&cmd);
-        uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
-        if (err == ESP_OK) {
-            mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "success", 0, duration_ms);
-        } else {
+        esp_err_t err = equipment_manager_dispatch_command(&cmd, resolved_mac);
+        if (err != ESP_OK) {
             mqtt_manager_publish_cmd_ack(target_mac_str, req_id, action_str, "error", (int)err, 0);
         }
     }
+
+    cJSON_Delete(root);
 }
 
 // -----------------------------------------------------------------------------
@@ -563,7 +622,10 @@ static void on_mqtt_connection_status_change(bool connected) {
                  (unsigned long)esp_log_timestamp());
         mqtt_manager_publish_gateway_status(status_json);
 
-        // 2. Publish Manifest and Snapshot for all active peers
+        // 2. Publish Equipment List Catalog (retained on .../equipment)
+        broadcast_equipment_list(NULL);
+
+        // 3. Publish Manifest and Snapshot for all active peers
         ble_peer_device_t peers[BLE_MAX_SIMULTANEOUS_CONNECTIONS];
         uint8_t count = 0;
         if (ble_manager_get_peers(peers, BLE_MAX_SIMULTANEOUS_CONNECTIONS, &count) == ESP_OK) {
@@ -575,9 +637,13 @@ static void on_mqtt_connection_status_change(bool connected) {
                          peers[i].addr[0], peers[i].addr[1], peers[i].addr[2],
                          peers[i].addr[3], peers[i].addr[4], peers[i].addr[5]);
 
+                unified_boiler_state_t b_state = s_g30_state;
+                bool g30_conn = false;
+                g30_controller_get_state(&b_state, &g30_conn, NULL, NULL);
+
                 char snapshot_json[768];
                 snprintf(snapshot_json, sizeof(snapshot_json),
-                         "{\"mac\":\"%s\",\"equipment_type\":\"boiler\",\"model\":\"%s\","
+                         "{\"mac\":\"%s\",\"equipment_type\":\"%s\",\"model\":\"%s\","
                          "\"rssi\":%d,\"state\":{"
                          "\"temperature\":{\"current_c\":%.1f,\"target_c\":%.1f,\"boil_c\":%.1f},"
                          "\"heating\":{\"active\":%s,\"power_pct\":%u,\"ramping\":%s},"
@@ -586,22 +652,24 @@ static void on_mqtt_connection_status_change(bool connected) {
                          "\"stage\":{\"step_index\":%u,\"auto_mode\":%s},"
                          "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
                          "},\"timestamp_ms\":%lu}",
-                         mac_str, peers[i].device_name[0] ? peers[i].device_name : "Grainfather G30 Connect",
+                         mac_str,
+                         equip_type_to_str(peers[i].equipment_type),
+                         peers[i].device_name[0] ? peers[i].device_name : "Grainfather G30 Connect",
                          peers[i].rssi,
-                         s_g30_state.current_temp_c, s_g30_state.target_temp_c, s_g30_state.boil_temp_c,
-                         s_g30_state.heat_active ? "true" : "false",
-                         s_g30_state.heat_power_pct,
-                         s_g30_state.ramp_active ? "true" : "false",
-                         s_g30_state.pump_active ? "true" : "false",
-                         s_g30_state.timer.active ? "true" : "false",
-                         s_g30_state.timer.paused ? "true" : "false",
-                         (unsigned long)s_g30_state.timer.remaining_seconds,
-                         (unsigned long)s_g30_state.timer.total_seconds,
-                         s_g30_state.stage.step_index,
-                         s_g30_state.auto_mode ? "true" : "false",
-                         s_g30_state.interaction.required ? "true" : "false",
-                         s_g30_state.interaction.code,
-                         s_g30_state.interaction.message,
+                         b_state.current_temp_c, b_state.target_temp_c, b_state.boil_temp_c,
+                         b_state.heat_active ? "true" : "false",
+                         b_state.heat_power_pct,
+                         b_state.ramp_active ? "true" : "false",
+                         b_state.pump_active ? "true" : "false",
+                         b_state.timer.active ? "true" : "false",
+                         b_state.timer.paused ? "true" : "false",
+                         (unsigned long)b_state.timer.remaining_seconds,
+                         (unsigned long)b_state.timer.total_seconds,
+                         b_state.stage.step_index,
+                         b_state.auto_mode ? "true" : "false",
+                         b_state.interaction.required ? "true" : "false",
+                         b_state.interaction.code,
+                         b_state.interaction.message,
                          (unsigned long)esp_log_timestamp());
 
                 mqtt_manager_publish_equipment_snapshot(mac_str, snapshot_json);
@@ -626,7 +694,7 @@ static void on_wifi_sta_status_change(bool connected, const char *ip) {
 }
 
 // -----------------------------------------------------------------------------
-// Telemetry Relay Worker Task (FreeRTOS Core 1) - Upstream BLE -> WiFi/MQTT
+// Telemetry Relay Worker Task (FreeRTOS Core 1) - Upstream BLE -> WiFi/MQTT/WS
 // -----------------------------------------------------------------------------
 static void telemetry_relay_task(void *pvParameters) {
     ble_telemetry_packet_t packet;
@@ -645,7 +713,19 @@ static void telemetry_relay_task(void *pvParameters) {
             ESP_LOGD(TAG, "Processing telemetry packet from dev %d (len: %u, RSSI: %d)",
                      packet.device_index, (unsigned int)packet.len, packet.rssi);
 
-            // Parse notification using Grainfather G30 protocol
+            // Route notification through multi-equipment manager first
+            bool eq_should_pub = false;
+            char eq_json[768] = {0};
+            esp_err_t eq_err = equipment_manager_process_notification(packet.mac,
+                                                                      packet.rssi,
+                                                                      packet.data,
+                                                                      packet.len,
+                                                                      packet.timestamp_ms,
+                                                                      &eq_should_pub,
+                                                                      eq_json,
+                                                                      sizeof(eq_json));
+
+            // Sync local boiler state for G30 telemetry evaluation
             g30_notification_type_t notif_type = G30_NOTIF_UNKNOWN;
             esp_err_t err = ESP_FAIL;
             if (s_g30_state_mutex != NULL && xSemaphoreTake(s_g30_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -654,6 +734,7 @@ static void telemetry_relay_task(void *pvParameters) {
             } else {
                 err = g30_parse_notification(packet.data, packet.len, &s_g30_state, &notif_type);
             }
+            (void)eq_err;
 
             char mac_str[13];
             snprintf(mac_str, sizeof(mac_str), "%02X%02X%02X%02X%02X%02X",
@@ -680,7 +761,7 @@ static void telemetry_relay_task(void *pvParameters) {
 
                 if (discrete_changed || throttle_expired || temp_delta_exceeded) {
                     snprintf(payload_json, sizeof(payload_json),
-                             "{\"mac\":\"%s\",\"equipment_type\":\"boiler\",\"model\":\"Grainfather G30\","
+                             "{\"event\":\"telemetry\",\"mac\":\"%s\",\"equipment_type\":\"boiler\",\"model\":\"Grainfather G30\","
                              "\"rssi\":%d,\"state\":{"
                              "\"temperature\":{\"current_c\":%.1f,\"target_c\":%.1f,\"boil_c\":%.1f},"
                              "\"heating\":{\"active\":%s,\"power_pct\":%u,\"ramping\":%s},"
@@ -709,6 +790,7 @@ static void telemetry_relay_task(void *pvParameters) {
                     if (mqtt_manager_is_connected()) {
                         mqtt_manager_publish_equipment_telemetry(mac_str, payload_json);
                     }
+                    web_server_ws_broadcast(payload_json);
 
                     s_prev_state = s_g30_state;
                     s_last_telemetry_pub_ms = now_ms;
@@ -716,13 +798,14 @@ static void telemetry_relay_task(void *pvParameters) {
             } else {
                 // Fallback payload for raw or non-G30 frames
                 snprintf(payload_json, sizeof(payload_json),
-                         "{\"dev\":%u,\"mac\":\"%s\",\"rssi\":%d,\"len\":%u,\"ts\":%lu}",
+                         "{\"event\":\"telemetry\",\"dev\":%u,\"mac\":\"%s\",\"rssi\":%d,\"len\":%u,\"ts\":%lu}",
                          packet.device_index, mac_str, packet.rssi,
                          (unsigned int)packet.len, (unsigned long)packet.timestamp_ms);
 
                 if (mqtt_manager_is_connected()) {
                     mqtt_manager_publish_equipment_telemetry(mac_str, payload_json);
                 }
+                web_server_ws_broadcast(payload_json);
             }
         }
     }
@@ -747,8 +830,9 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // 2. Initialize Persistent Configuration Store
+    // 2. Initialize Persistent Configuration Store & Security / Pairing Manager
     ESP_ERROR_CHECK(config_store_init());
+    ESP_ERROR_CHECK(auth_manager_init());
 
     // 3. Derive Gateway Hardware ID
     uint8_t base_mac[6];
@@ -773,11 +857,32 @@ void app_main(void) {
         return;
     }
 
-    // 4b. Create G30 State Mutex
+    // 4b. Create G30 State Mutex & Initialize Multi-Equipment Manager
     s_g30_state_mutex = xSemaphoreCreateMutex();
     if (s_g30_state_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create s_g30_state_mutex");
         return;
+    }
+    ESP_ERROR_CHECK(equipment_manager_init(s_ble_cmd_queue));
+
+    // Restore persisted paired BLE devices and their unique names from NVS
+    paired_ble_device_t paired_ble[CONFIG_STORE_MAX_PAIRED_BLE];
+    if (config_store_get_paired_ble(paired_ble) == ESP_OK) {
+        for (uint8_t i = 0; i < CONFIG_STORE_MAX_PAIRED_BLE; i++) {
+            if (paired_ble[i].active) {
+                uint8_t slot_idx = 0;
+                equipment_manager_register_paired_device(paired_ble[i].addr,
+                                                         (equipment_type_t)paired_ble[i].equipment_type,
+                                                         paired_ble[i].name,
+                                                         paired_ble[i].model,
+                                                         &slot_idx);
+                ESP_LOGI(TAG, "Restored paired BLE device [slot %u]: '%s' (%02X:%02X:%02X:%02X:%02X:%02X)",
+                         (unsigned int)(slot_idx + 1),
+                         paired_ble[i].name,
+                         paired_ble[i].addr[0], paired_ble[i].addr[1], paired_ble[i].addr[2],
+                         paired_ble[i].addr[3], paired_ble[i].addr[4], paired_ble[i].addr[5]);
+            }
+        }
     }
 
     // 5. Start Core 1 Telemetry Relay Task
@@ -798,6 +903,7 @@ void app_main(void) {
     // 7. Initialize NimBLE Central Subsystem (starts host & command worker on Core 0)
     ESP_ERROR_CHECK(ble_manager_init(s_telemetry_queue, s_ble_cmd_queue));
     ble_manager_register_peer_cb(on_ble_peer_lifecycle_event);
+    ble_manager_register_seq_cb(on_ble_cmd_seq_complete);
 
     // 8. Initialize MQTT Subsystem with Gateway ID & Callbacks
     ESP_ERROR_CHECK(mqtt_manager_init(s_gateway_id, process_inbound_command, on_mqtt_connection_status_change));

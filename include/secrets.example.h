@@ -13,4 +13,8 @@
 
 #define HTTP_RELAY_ENDPOINT "http://192.168.1.100:8080/api/telemetry"
 
+// Optional static API token for external BeerXML/WebSocket/HTTP/MQTT client pairing.
+// Leave empty ("") to auto-generate a cryptographic token in NVS during PIN pairing.
+#define BREWLINK_API_TOKEN  ""
+
 #endif // BREWLINK_SECRETS_EXAMPLE_H

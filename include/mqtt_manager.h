@@ -90,6 +90,13 @@ esp_err_t mqtt_manager_publish_gateway_status(const char *status_json);
 esp_err_t mqtt_manager_publish_equipment_announce(const char *eq_mac, const char *manifest_json);
 
 /**
+ * @brief Publish retained JSON catalog of all paired/connected BLE equipment devices
+ * @param list_json JSON payload formatted by equipment_manager_format_equipment_list_json
+ * @return ESP_OK on success
+ */
+esp_err_t mqtt_manager_publish_equipment_list(const char *list_json);
+
+/**
  * @brief Publish equipment telemetry
  * @param eq_mac Equipment MAC string
  * @param telemetry_json JSON payload
