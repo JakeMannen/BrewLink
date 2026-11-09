@@ -8,14 +8,30 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+
+#ifdef ESP_PLATFORM
 #include "esp_err.h"
+#else
+#ifndef ESP_OK
+typedef int esp_err_t;
+#define ESP_OK                  0
+#define ESP_FAIL                -1
+#define ESP_ERR_NO_MEM          0x101
+#define ESP_ERR_INVALID_ARG     0x102
+#define ESP_ERR_INVALID_STATE   0x103
+#define ESP_ERR_NOT_FOUND       0x105
+#define ESP_ERR_TIMEOUT         0x107
+#endif
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define WIFI_MGR_SSID_MAX_LEN       33
-#define WIFI_MGR_IP_STR_MAX_LEN     16
+#define WIFI_MGR_SSID_MAX_LEN              33
+#define WIFI_MGR_IP_STR_MAX_LEN            16
+#define WIFI_MGR_SCAN_MAX_RAW_RECORDS      40
+#define WIFI_MGR_SCAN_MAX_UNIQUE_RECORDS   20
 
 /**
  * @brief Information for an individual scanned Wi-Fi access point
@@ -63,6 +79,21 @@ esp_err_t wifi_manager_init(wifi_manager_sta_cb_t sta_cb);
  * @return ESP_OK on success, or ESP error code.
  */
 esp_err_t wifi_manager_scan(wifi_mgr_ap_record_t **out_records, uint16_t *out_count);
+
+/**
+ * @brief Filter and deduplicate scanned Wi-Fi access points by SSID
+ * @details Retains only unique non-empty SSIDs, keeping the record with the strongest RSSI,
+ *          and sorts the results in descending order by RSSI (strongest signal first).
+ * @param[in] in_records Array of input scan records
+ * @param in_count Number of input records
+ * @param[out] out_records Output buffer for deduplicated records (pre-allocated by caller)
+ * @param max_out Maximum capacity of out_records
+ * @return Number of unique records stored in out_records
+ */
+uint16_t wifi_manager_deduplicate_ap_records(const wifi_mgr_ap_record_t *in_records,
+                                             uint16_t in_count,
+                                             wifi_mgr_ap_record_t *out_records,
+                                             uint16_t max_out);
 
 /**
  * @brief Free dynamically allocated scan results

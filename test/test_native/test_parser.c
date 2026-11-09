@@ -14,6 +14,8 @@
 #include "../../src/ble_compatibility.c"
 #include "../../src/auth_manager.c"
 #include "../../src/equipment_manager.c"
+#include "wifi_manager.h"
+#include "../../src/wifi_manager.c"
 
 void setUp(void) {
     // Set up before each test
@@ -86,6 +88,107 @@ void test_wifi_ap_configuration_defines(void) {
     TEST_ASSERT_EQUAL_INT(1, WIFI_AP_CHANNEL);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(1, WIFI_AP_MAX_CONN);
     TEST_ASSERT_EQUAL_INT(80, WEB_SERVER_PORT);
+}
+
+void test_wifi_scan_deduplicate_keeps_strongest_rssi(void) {
+    wifi_mgr_ap_record_t in_aps[5] = {
+        {"MyMeshHome", -75, 3},
+        {"NeighborWiFi", -80, 2},
+        {"MyMeshHome", -42, 4},
+        {"MyMeshHome", -60, 3},
+        {"NeighborWiFi", -65, 2}
+    };
+    wifi_mgr_ap_record_t out_aps[10];
+    memset(out_aps, 0, sizeof(out_aps));
+
+    uint16_t count = wifi_manager_deduplicate_ap_records(in_aps, 5, out_aps, 10);
+    TEST_ASSERT_EQUAL_UINT16(2, count);
+
+    // Sorted descending by RSSI: -42 dBm ("MyMeshHome") before -65 dBm ("NeighborWiFi")
+    TEST_ASSERT_EQUAL_STRING("MyMeshHome", out_aps[0].ssid);
+    TEST_ASSERT_EQUAL_INT8(-42, out_aps[0].rssi);
+    TEST_ASSERT_EQUAL_UINT8(4, out_aps[0].authmode);
+
+    TEST_ASSERT_EQUAL_STRING("NeighborWiFi", out_aps[1].ssid);
+    TEST_ASSERT_EQUAL_INT8(-65, out_aps[1].rssi);
+    TEST_ASSERT_EQUAL_UINT8(2, out_aps[1].authmode);
+}
+
+void test_wifi_scan_deduplicate_filters_empty_hidden_ssids(void) {
+    wifi_mgr_ap_record_t in_aps[4] = {
+        {"", -30, 3},
+        {"ValidNetwork", -70, 3},
+        {"", -50, 3},
+        {"\0", -40, 0}
+    };
+    wifi_mgr_ap_record_t out_aps[5];
+    memset(out_aps, 0, sizeof(out_aps));
+
+    uint16_t count = wifi_manager_deduplicate_ap_records(in_aps, 4, out_aps, 5);
+    TEST_ASSERT_EQUAL_UINT16(1, count);
+    TEST_ASSERT_EQUAL_STRING("ValidNetwork", out_aps[0].ssid);
+    TEST_ASSERT_EQUAL_INT8(-70, out_aps[0].rssi);
+}
+
+void test_wifi_scan_deduplicate_sorts_descending_by_rssi(void) {
+    wifi_mgr_ap_record_t in_aps[4] = {
+        {"Weakest", -90, 1},
+        {"Strongest", -35, 3},
+        {"Medium", -65, 2},
+        {"SecondStrongest", -45, 3}
+    };
+    wifi_mgr_ap_record_t out_aps[10];
+    memset(out_aps, 0, sizeof(out_aps));
+
+    uint16_t count = wifi_manager_deduplicate_ap_records(in_aps, 4, out_aps, 10);
+    TEST_ASSERT_EQUAL_UINT16(4, count);
+
+    TEST_ASSERT_EQUAL_STRING("Strongest", out_aps[0].ssid);
+    TEST_ASSERT_EQUAL_INT8(-35, out_aps[0].rssi);
+
+    TEST_ASSERT_EQUAL_STRING("SecondStrongest", out_aps[1].ssid);
+    TEST_ASSERT_EQUAL_INT8(-45, out_aps[1].rssi);
+
+    TEST_ASSERT_EQUAL_STRING("Medium", out_aps[2].ssid);
+    TEST_ASSERT_EQUAL_INT8(-65, out_aps[2].rssi);
+
+    TEST_ASSERT_EQUAL_STRING("Weakest", out_aps[3].ssid);
+    TEST_ASSERT_EQUAL_INT8(-90, out_aps[3].rssi);
+}
+
+void test_wifi_scan_deduplicate_handles_null_and_zero_inputs(void) {
+    wifi_mgr_ap_record_t aps[2] = {{"Net", -50, 1}, {"Net2", -60, 1}};
+    wifi_mgr_ap_record_t out[2];
+
+    TEST_ASSERT_EQUAL_UINT16(0, wifi_manager_deduplicate_ap_records(NULL, 2, out, 2));
+    TEST_ASSERT_EQUAL_UINT16(0, wifi_manager_deduplicate_ap_records(aps, 2, NULL, 2));
+    TEST_ASSERT_EQUAL_UINT16(0, wifi_manager_deduplicate_ap_records(aps, 0, out, 2));
+    TEST_ASSERT_EQUAL_UINT16(0, wifi_manager_deduplicate_ap_records(aps, 2, out, 0));
+}
+
+void test_wifi_scan_deduplicate_respects_max_output_limit(void) {
+    wifi_mgr_ap_record_t in_aps[5] = {
+        {"Net1", -85, 1},
+        {"Net2", -40, 2},
+        {"Net3", -90, 1},
+        {"Net4", -50, 3},
+        {"Net5", -30, 2}
+    };
+    wifi_mgr_ap_record_t out_aps[3];
+    memset(out_aps, 0, sizeof(out_aps));
+
+    uint16_t count = wifi_manager_deduplicate_ap_records(in_aps, 5, out_aps, 3);
+    TEST_ASSERT_EQUAL_UINT16(3, count);
+
+    // The top 3 strongest unique networks must be retained and sorted
+    TEST_ASSERT_EQUAL_STRING("Net5", out_aps[0].ssid);
+    TEST_ASSERT_EQUAL_INT8(-30, out_aps[0].rssi);
+
+    TEST_ASSERT_EQUAL_STRING("Net2", out_aps[1].ssid);
+    TEST_ASSERT_EQUAL_INT8(-40, out_aps[1].rssi);
+
+    TEST_ASSERT_EQUAL_STRING("Net4", out_aps[2].ssid);
+    TEST_ASSERT_EQUAL_INT8(-50, out_aps[2].rssi);
 }
 
 // =============================================================================
@@ -1233,6 +1336,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_esp_idf_version_constraint);
     RUN_TEST(test_ble_peer_and_scan_structures);
     RUN_TEST(test_wifi_ap_configuration_defines);
+    RUN_TEST(test_wifi_scan_deduplicate_keeps_strongest_rssi);
+    RUN_TEST(test_wifi_scan_deduplicate_filters_empty_hidden_ssids);
+    RUN_TEST(test_wifi_scan_deduplicate_sorts_descending_by_rssi);
+    RUN_TEST(test_wifi_scan_deduplicate_handles_null_and_zero_inputs);
+    RUN_TEST(test_wifi_scan_deduplicate_respects_max_output_limit);
 
     // G30 Notification Parsing tests
     RUN_TEST(test_g30_parse_temperature_notification);
