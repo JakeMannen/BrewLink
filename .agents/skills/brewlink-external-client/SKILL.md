@@ -27,7 +27,7 @@ It documents only what external clients see. Internal gateway details (Wi-Fi onb
 ---
 ## 1. Network Broadcast Discovery & Push-Button Pairing
 
-Because the ESP32 gateway operates headlessly when the user holds the physical **`BOOT` button (`GPIO 0`) for 3 seconds**, BrewLink supports **code-free push-button pairing** with automatic network broadcast discovery.
+Because the ESP32 gateway operates headlessly when the user holds the physical **`BOOT` button for 3 seconds**, BrewLink supports **code-free push-button pairing** with automatic network broadcast discovery.
 
 While the 60-second pairing window is active, BrewLink broadcasts a discovery beacon every **2 seconds** over both **UDP Broadcast** (for local network clients) and **MQTT** (for cloud/broker clients):
 
@@ -82,7 +82,7 @@ All REST endpoints operate on `http://<gateway-ip>/`. Protected endpoints requir
 
 #### `POST /api/pair/claim` — Claim Push-Button Pairing Session (Code-Free)
 When the 60-second pairing window is open (triggered via physical `BOOT` button hold for 3s), the external client claims the session **without needing a PIN** (physical button press acts as proof of authorization, with immediate single-claim lockout).
-* **Unique Client Naming (`<presented_name>-<suffix>`)**: BrewLink takes the `"client_name"` presented by the external client (e.g., `"Brewfather"`), appends a random 4-character hex suffix `-<xxxx>` (e.g., `"Brewfather-A4F2"`), and guarantees that the resulting name is unique across all paired external clients (up to 8 clients stored in NVS).
+* **Unique Client Naming (`<presented_name>-<suffix>`)**: BrewLink takes the `"client_name"` presented by the external client (e.g., `"Brewfather"`), appends a random 4-character hex suffix `-<xxxx>` (e.g., `"Brewfather-A4F2"`), and guarantees that the resulting name is unique across all paired external clients (up to 8 clients).
 * **Deletable Clients**: Any paired external client can be deleted from the BrewLink Web UI (`Client Pairing` tab) or via `POST /api/pair/delete` (`{"client_name": "Brewfather-A4F2"}`), which immediately revokes its `api_token`.
 
 * **Request (Code-Free Push-Button Claim)**:
@@ -119,7 +119,7 @@ When the 60-second pairing window is open (triggered via physical `BOOT` button 
 #### `GET /api/equipment` — List Paired Bluetooth Equipment & State
 External clients do **not** need to know BLE MAC addresses ahead of time. Query `GET /api/equipment` to list all paired Bluetooth equipment devices across BrewLink's 3 BLE Central slots (`slot` `1..3`):
 * **Guaranteed Unique Equipment Names**: Every paired Bluetooth peripheral has a guaranteed unique `name` across all slots. If two identical models are paired (e.g. two `"Grainfather G30 Connect"` boilers), BrewLink automatically disambiguates the second device by appending its 2-byte MAC suffix (e.g. `"Grainfather G30 Connect-8B22"`).
-* **Automatic Power-On Reconnection**: Paired Bluetooth devices are persisted in BrewLink NVS (`paired: true`) and **automatically reconnect** whenever BrewLink boots or when a piece of brewing equipment is powered on. Devices that are paired but currently powered off appear in the list with `"paired": true` and `"connected": false`.
+* **Automatic Power-On Reconnection**: Paired Bluetooth devices are remembered by BrewLink (`paired: true`) and **automatically reconnect** whenever BrewLink boots or when a piece of brewing equipment is powered on. Devices that are paired but currently powered off appear in the list with `"paired": true` and `"connected": false`.
 
 * **Request**:
   ```http
@@ -448,22 +448,7 @@ Because MQTT command topics can be intercepted on shared brokers, all commands p
 
 ## 5. Client Implementation Cheatsheets
 
-### 5.1. Reference Python CLI (`tools/beerxml_uploader.py`)
-Use the bundled reference client to auto-discover via UDP `:53540`, pair without a code, list connected Bluetooth devices, convert BeerxML files, and upload without needing a MAC address:
-```bash
-# 1. Hold physical BOOT button on ESP32 for 3s, then auto-discover & claim pairing (zero code, no IP needed)
-python3 tools/beerxml_uploader.py --pair --client-name "MyLaptop"
-
-# 2. List all paired/connected Bluetooth devices on BrewLink (returns slot 1..3, name, equipment_type, mac)
-python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --list-devices
-
-# 3. Upload BeerxML recipe to Grainfather G30 by equipment_type (default: boiler), --name, or --slot 1 (no MAC needed)
-python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --xml recipe.xml
-python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --name "Grainfather G30 Connect" --xml recipe.xml
-python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --slot 1 --xml recipe.xml
-```
-
-### 5.2. Node.js / JavaScript WebSocket Client
+### 5.1. Node.js / JavaScript WebSocket Client
 ```javascript
 const WebSocket = require('ws');
 
@@ -494,7 +479,7 @@ ws.on('message', (raw) => {
 });
 ```
 
-### 5.3. Python MQTT Client (`paho-mqtt`)
+### 5.2. Python MQTT Client (`paho-mqtt`)
 ```python
 import paho.mqtt.client as mqtt
 import json, time, hmac, hashlib
@@ -540,7 +525,6 @@ Each supported equipment model has **its own schema**; schemas are never shared 
 * `model`: `"Grainfather G30 Connect"` (telemetry may report `"Grainfather G30"`)
 * `equipment_type`: `"boiler"` (default target when `equipment_type` is omitted)
 * Capabilities: `recipe_upload`, `mash_profile`, `pump_control`, `heat_control`; `fermentation_profile` is **false**.
-* Firmware schema: `include/g30_schema.h` (`g30_state_t`, `g30_command_t`, `g30_recipe_t`).
 
 #### 6.1.1. State (`state` in `GET /api/equipment`)
 
@@ -639,7 +623,7 @@ Completion is reported by `cmd_ack` (`status: success|error`, `error_code`; `261
 | `boil_additions_min[]` | int[] | max **8** | Minutes remaining in boil at which each addition alert fires |
 | `fermentation_steps[]`, `target_og_sg`, `target_fg_sg` | – | – | Accepted but **ignored by the G30** (it is not a fermenter) |
 
-BrewLink transmits the recipe as provided and does not validate brewing sense. Recipes from BeerXML/BeerJSON can be converted with `tools/beerxml_uploader.py` (or the `brewing-recipe-schemas` skill). Typical brew-day flow after upload: `interaction.code 1` → `press_set` → heat to strike → code 2 → `ack_interaction` → mash steps → sparge prompts (3/4) → boil with addition alerts (5) → cooling (6).
+BrewLink transmits the recipe as provided and does not validate brewing sense. Convert recipes from other formats (e.g. BeerXML, BeerJSON) to this format on the client side before uploading. Typical brew-day flow after upload: `interaction.code 1` → `press_set` → heat to strike → code 2 → `ack_interaction` → mash steps → sparge prompts (3/4) → boil with addition alerts (5) → cooling (6).
 
 ---
 
