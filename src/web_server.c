@@ -212,6 +212,11 @@ static cJSON *serialize_equipment_slot_cjson(const equipment_slot_t *slot, uint8
         cJSON_AddBoolToObject(st, "pump_active", b->pump_active);
         cJSON_AddBoolToObject(st, "auto_mode", b->auto_mode);
         cJSON_AddBoolToObject(st, "ramp_active", b->ramp_active);
+        cJSON_AddBoolToObject(st, "delayed_heat", b->delayed_heat);
+        cJSON_AddBoolToObject(st, "interrupted", b->interrupted);
+        cJSON_AddBoolToObject(st, "manual_power", b->manual_power);
+        cJSON_AddBoolToObject(st, "sparge_alert", b->sparge_alert);
+        cJSON_AddNumberToObject(st, "error_code", b->error_code);
 
         cJSON *tm = cJSON_AddObjectToObject(st, "timer");
         cJSON_AddBoolToObject(tm, "active", b->timer.active);
@@ -755,10 +760,35 @@ static bool parse_json_control_command(cJSON *root, g30_command_t *cmd) {
     } else if (strcmp(action_str, "cancel_session") == 0) {
         cmd->action = G30_CMD_ACTION_CANCEL_SESSION;
         return true;
-    } else if (strcmp(action_str, "toggle_timer") == 0 ||
-               strcmp(action_str, "pause_timer") == 0 ||
-               strcmp(action_str, "resume_timer") == 0) {
+    } else if (strcmp(action_str, "temp_up") == 0) {
+        cmd->action = G30_CMD_ACTION_TEMP_UP;
+        return true;
+    } else if (strcmp(action_str, "temp_down") == 0) {
+        cmd->action = G30_CMD_ACTION_TEMP_DOWN;
+        return true;
+    } else if (strcmp(action_str, "disconnect_manual") == 0) {
+        cmd->action = G30_CMD_ACTION_DISCONNECT_MANUAL;
+        return true;
+    } else if (strcmp(action_str, "disconnect_auto") == 0) {
+        cmd->action = G30_CMD_ACTION_DISCONNECT_AUTO;
+        return true;
+    } else if (strcmp(action_str, "delayed_heat") == 0) {
+        cmd->action = G30_CMD_ACTION_DELAYED_HEAT;
+        cJSON *dm = cJSON_GetObjectItem(scope, "minutes");
+        cJSON *ds = cJSON_GetObjectItem(scope, "seconds");
+        if (dm && cJSON_IsNumber(dm) && dm->valueint >= 0 && dm->valueint <= 999) {
+            cmd->params.delayed_heat.minutes = (uint16_t)dm->valueint;
+            cmd->params.delayed_heat.seconds = (ds && cJSON_IsNumber(ds) && ds->valueint >= 0 && ds->valueint < 60) ? (uint8_t)ds->valueint : 0;
+            return true;
+        }
+    } else if (strcmp(action_str, "toggle_timer") == 0) {
+        cmd->action = G30_CMD_ACTION_TOGGLE_TIMER;
+        return true;
+    } else if (strcmp(action_str, "pause_timer") == 0) {
         cmd->action = G30_CMD_ACTION_PAUSE_TIMER;
+        return true;
+    } else if (strcmp(action_str, "resume_timer") == 0) {
+        cmd->action = G30_CMD_ACTION_RESUME_TIMER;
         return true;
     } else if (strcmp(action_str, "cancel_timer") == 0) {
         cmd->action = G30_CMD_ACTION_CANCEL_TIMER;
@@ -1411,6 +1441,11 @@ static esp_err_t api_g30_status_get_handler(httpd_req_t *req) {
         cJSON_AddBoolToObject(st, "pump_active", state.pump_active);
         cJSON_AddBoolToObject(st, "auto_mode", state.auto_mode);
         cJSON_AddBoolToObject(st, "ramp_active", state.ramp_active);
+        cJSON_AddBoolToObject(st, "delayed_heat", state.delayed_heat);
+        cJSON_AddBoolToObject(st, "interrupted", state.interrupted);
+        cJSON_AddBoolToObject(st, "manual_power", state.manual_power);
+        cJSON_AddBoolToObject(st, "sparge_alert", state.sparge_alert);
+        cJSON_AddNumberToObject(st, "error_code", state.error_code);
 
         cJSON *tm = cJSON_AddObjectToObject(st, "timer");
         cJSON_AddBoolToObject(tm, "active", state.timer.active);

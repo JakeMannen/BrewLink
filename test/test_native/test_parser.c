@@ -301,6 +301,58 @@ void test_g30_encode_timer_commands(void) {
     TEST_ASSERT_EQUAL_STRING("C                  ", buf);
 }
 
+void test_g30_encode_extended_commands(void) {
+    char buf[G30_COMMAND_LEN + 1];
+    g30_command_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.action = G30_CMD_ACTION_TEMP_UP;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("U                  ", buf);
+
+    cmd.action = G30_CMD_ACTION_TEMP_DOWN;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("D                  ", buf);
+
+    cmd.action = G30_CMD_ACTION_DELAYED_HEAT;
+    cmd.params.delayed_heat.minutes = 30;
+    cmd.params.delayed_heat.seconds = 15;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("B30,15,            ", buf);
+
+    cmd.action = G30_CMD_ACTION_DISCONNECT_MANUAL;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("Q0                 ", buf);
+
+    cmd.action = G30_CMD_ACTION_DISCONNECT_AUTO;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("Q2                 ", buf);
+
+    cmd.action = G30_CMD_ACTION_TOGGLE_TIMER;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
+    TEST_ASSERT_EQUAL_STRING("G                  ", buf);
+}
+
+void test_g30_parse_extended_state_flags(void) {
+    g30_state_t state;
+    g30_notification_type_t type;
+    memset(&state, 0, sizeof(state));
+
+    const char *y = "Y0,0,0,0,0,0,1,1";
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_parse_notification((const uint8_t *)y, strlen(y), &state, &type));
+    TEST_ASSERT_TRUE(state.delayed_heat);
+
+    const char *w = "W50,0,1,1,1,1";
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_parse_notification((const uint8_t *)w, strlen(w), &state, &type));
+    TEST_ASSERT_EQUAL_UINT8(50, state.heat_power_pct);
+    TEST_ASSERT_TRUE(state.interrupted);
+    TEST_ASSERT_TRUE(state.manual_power);
+    TEST_ASSERT_TRUE(state.sparge_alert);
+
+    const char *e = "E7";
+    TEST_ASSERT_EQUAL_INT(ESP_OK, g30_parse_notification((const uint8_t *)e, strlen(e), &state, &type));
+    TEST_ASSERT_EQUAL_UINT8(7, state.error_code);
+}
 void test_g30_encode_recipe_commands(void) {
     char buf[G30_COMMAND_LEN + 1];
     g30_recipe_t recipe;
@@ -1248,6 +1300,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_g30_encode_heat_command);
     RUN_TEST(test_g30_encode_target_temperature);
     RUN_TEST(test_g30_encode_timer_commands);
+    RUN_TEST(test_g30_encode_extended_commands);
+    RUN_TEST(test_g30_parse_extended_state_flags);
     RUN_TEST(test_g30_encode_recipe_commands);
 
     // Topic Hierarchy & Cadence tests

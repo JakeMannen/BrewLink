@@ -472,6 +472,9 @@ static void process_inbound_command(const char *topic, const char *payload, int 
         cJSON *dur = params ? cJSON_GetObjectItem(params, "duration_min") : NULL;
         cmd.params.timer_duration_min = (dur && cJSON_IsNumber(dur)) ? (uint16_t)dur->valueint : 0;
         handled = true;
+    } else if (strcmp(action_str, "toggle_timer") == 0) {
+        cmd.action = G30_CMD_ACTION_TOGGLE_TIMER;
+        handled = true;
     } else if (strcmp(action_str, "pause_timer") == 0) {
         cmd.action = G30_CMD_ACTION_PAUSE_TIMER;
         handled = true;
@@ -496,6 +499,27 @@ static void process_inbound_command(const char *topic, const char *payload, int 
     } else if (strcmp(action_str, "cancel_session") == 0) {
         cmd.action = G30_CMD_ACTION_CANCEL_SESSION;
         handled = true;
+    } else if (strcmp(action_str, "temp_up") == 0) {
+        cmd.action = G30_CMD_ACTION_TEMP_UP;
+        handled = true;
+    } else if (strcmp(action_str, "temp_down") == 0) {
+        cmd.action = G30_CMD_ACTION_TEMP_DOWN;
+        handled = true;
+    } else if (strcmp(action_str, "disconnect_manual") == 0) {
+        cmd.action = G30_CMD_ACTION_DISCONNECT_MANUAL;
+        handled = true;
+    } else if (strcmp(action_str, "disconnect_auto") == 0) {
+        cmd.action = G30_CMD_ACTION_DISCONNECT_AUTO;
+        handled = true;
+    } else if (strcmp(action_str, "delayed_heat") == 0) {
+        cmd.action = G30_CMD_ACTION_DELAYED_HEAT;
+        cJSON *dm = params ? cJSON_GetObjectItem(params, "minutes") : NULL;
+        cJSON *ds = params ? cJSON_GetObjectItem(params, "seconds") : NULL;
+        if (dm && cJSON_IsNumber(dm) && dm->valueint >= 0 && dm->valueint <= 999) {
+            cmd.params.delayed_heat.minutes = (uint16_t)dm->valueint;
+            cmd.params.delayed_heat.seconds = (ds && cJSON_IsNumber(ds) && ds->valueint >= 0 && ds->valueint < 60) ? (uint8_t)ds->valueint : 0;
+            handled = true;
+        }
     } else if (strcmp(action_str, "load_recipe") == 0) {
         cmd.action = G30_CMD_ACTION_LOAD_RECIPE;
         is_recipe = true;
@@ -650,7 +674,7 @@ static void on_mqtt_connection_status_change(bool connected) {
                          "\"pump\":{\"active\":%s},"
                          "\"timer\":{\"active\":%s,\"paused\":%s,\"remaining_seconds\":%lu,\"total_seconds\":%lu},"
                          "\"stage\":{\"step_index\":%u,\"auto_mode\":%s},"
-                         "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
+                         "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"},\"flags\":{\"delayed_heat\":%s,\"interrupted\":%s,\"manual_power\":%s,\"sparge_alert\":%s},\"error_code\":%u"
                          "},\"timestamp_ms\":%lu}",
                          mac_str,
                          equip_type_to_str(peers[i].equipment_type),
@@ -670,6 +694,11 @@ static void on_mqtt_connection_status_change(bool connected) {
                          b_state.interaction.required ? "true" : "false",
                          b_state.interaction.code,
                          b_state.interaction.message,
+                         b_state.delayed_heat ? "true" : "false",
+                         b_state.interrupted ? "true" : "false",
+                         b_state.manual_power ? "true" : "false",
+                         b_state.sparge_alert ? "true" : "false",
+                         b_state.error_code,
                          (unsigned long)esp_log_timestamp());
 
                 mqtt_manager_publish_equipment_snapshot(mac_str, snapshot_json);
@@ -752,7 +781,10 @@ static void telemetry_relay_task(void *pvParameters) {
                                         (s_g30_state.interaction.required != s_prev_state.interaction.required) ||
                                         (s_g30_state.interaction.code != s_prev_state.interaction.code) ||
                                         (s_g30_state.timer.active != s_prev_state.timer.active) ||
-                                        (s_g30_state.timer.paused != s_prev_state.timer.paused);
+                                        (s_g30_state.timer.paused != s_prev_state.timer.paused) ||
+                                        (s_g30_state.delayed_heat != s_prev_state.delayed_heat) ||
+                                        (s_g30_state.sparge_alert != s_prev_state.sparge_alert) ||
+                                        (s_g30_state.error_code != s_prev_state.error_code);
 
                 uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
                 float temp_delta = fabsf(s_g30_state.current_temp_c - s_prev_state.current_temp_c);
@@ -768,7 +800,7 @@ static void telemetry_relay_task(void *pvParameters) {
                              "\"pump\":{\"active\":%s},"
                              "\"timer\":{\"active\":%s,\"paused\":%s,\"remaining_seconds\":%lu,\"total_seconds\":%lu},"
                              "\"stage\":{\"step_index\":%u,\"auto_mode\":%s},"
-                             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
+                             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"},\"flags\":{\"delayed_heat\":%s,\"interrupted\":%s,\"manual_power\":%s,\"sparge_alert\":%s},\"error_code\":%u"
                              "},\"timestamp_ms\":%lu}",
                              mac_str, packet.rssi,
                              s_g30_state.current_temp_c, s_g30_state.target_temp_c, s_g30_state.boil_temp_c,
@@ -785,6 +817,11 @@ static void telemetry_relay_task(void *pvParameters) {
                              s_g30_state.interaction.required ? "true" : "false",
                              s_g30_state.interaction.code,
                              s_g30_state.interaction.message,
+                             s_g30_state.delayed_heat ? "true" : "false",
+                             s_g30_state.interrupted ? "true" : "false",
+                             s_g30_state.manual_power ? "true" : "false",
+                             s_g30_state.sparge_alert ? "true" : "false",
+                             s_g30_state.error_code,
                              (unsigned long)packet.timestamp_ms);
 
                     if (mqtt_manager_is_connected()) {

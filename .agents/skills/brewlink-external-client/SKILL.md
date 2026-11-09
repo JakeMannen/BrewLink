@@ -259,7 +259,7 @@ Send immediate hardware commands targeting by `equipment_type` or `slot` (or opt
   ```
 * **Supported Actions & Parameters** (shown for the G30 `boiler`; other models define their own in Section 6):
   * `set_pump`: `params: {"state": true|false}`
-  * `set_heat`: `params: {"state": true|false, "power_pct": 0-100}`
+  * `set_heat`: `params: {"state": true|false}` (`power_pct` ignored by the G30)
   * `set_target_temp`: `params: {"temp_c": 65.5}`
   * `set_timer`: `params: {"duration_min": 60}`
   * `pause_timer` / `resume_timer` / `cancel_timer`: no params required.
@@ -554,6 +554,9 @@ Each supported equipment model has **its own schema**; schemas are never shared 
 | `pump_active` | bool | Pump running |
 | `auto_mode` | bool | `true` = running a recipe, `false` = manual |
 | `ramp_active` | bool | Heating up to the next step's setpoint |
+| `delayed_heat` | bool | A delayed heating start is scheduled |
+| `interrupted` / `manual_power` / `sparge_alert` | bool | G30 `W` flags: process interrupted, manual power mode, sparge alert active |
+| `error_code` | int | Last controller error code (`E` notification), `0` = none |
 | `timer.active/paused` | bool | Timer state |
 | `timer.remaining_seconds/total_seconds` | int | Timer progress |
 | `stage.step_index` | int | Controller stage (1..N = mash steps) |
@@ -586,28 +589,40 @@ Each supported equipment model has **its own schema**; schemas are never shared 
     "pump": {"active": true},
     "timer": {"active": true, "paused": false, "remaining_seconds": 2340, "total_seconds": 3600},
     "stage": {"step_index": 1, "step_name": "Mash Step 1", "auto_mode": true},
-    "interaction": {"required": false, "code": 0, "message": "Normal operation"}
+    "interaction": {"required": false, "code": 0, "message": "Normal operation"},
+    "flags": {"delayed_heat": false, "interrupted": false, "manual_power": false, "sparge_alert": false},
+    "error_code": 0
   },
   "timestamp_ms": 1459200
 }
 ```
-Note: telemetry groups fields (`temperature`, `heating`, `pump`, ...) while `GET /api/equipment` returns the flat state fields of 6.1.1. Same data, different shape.
+Note: telemetry groups fields (`temperature`, `heating`, `pump`, ...; extra flags under `flags`) while `GET /api/equipment` returns the flat state fields of 6.1.1. Same data, different shape.
 
 #### 6.1.3. Control actions (`POST /api/equipment/control`, WebSocket, or MQTT `.../cmd`)
 
 | `action` | `params` | Effect |
 | :--- | :--- | :--- |
 | `set_pump` | `{"state": bool}` | Pump on/off |
-| `set_heat` | `{"state": bool, "power_pct": 0-100}` | Heater on/off + power |
+| `set_heat` | `{"state": bool}` | Heater on/off. (`power_pct` is accepted but **ignored**: the G30 has no power command; read `heat_power_pct` for the controller-managed output) |
 | `set_target_temp` | `{"temp_c": number}` | Setpoint |
+| `temp_up` / `temp_down` | none | Raise / lower the setpoint by 1 °C |
+| `delayed_heat` | `{"minutes": 0-999, "seconds": 0-59}` | Schedule a delayed heating start (see `delayed_heat` state flag) |
 | `set_timer` | `{"duration_min": int}` | Start timer |
-| `pause_timer` / `resume_timer` / `cancel_timer` | none | Timer control |
+| `pause_timer` | none | Pause the timer. Rejected (`INVALID_STATE`) if already paused |
+| `resume_timer` | none | Resume the timer. Rejected if not paused |
+| `toggle_timer` | none | Raw G30 pause/resume toggle |
+| `cancel_timer` | none | Cancel the timer |
 | `press_set` | none | Press the physical SET button (advance prompt / start strike heating) |
 | `ack_interaction` | none | Acknowledge a prompt (e.g. grain added) |
 | `dismiss_alert` | none | Dismiss boil / hop addition alert |
 | `dismiss_sparge_alert` | none | Dismiss sparge prompt |
 | `cancel_session` | none | Abort the active recipe |
+| `disconnect_manual` / `disconnect_auto` | none | Leave manual / auto mode on the G30 without cancelling the session |
 | `load_recipe` | `{"recipe": {...}}` | Upload recipe (6.1.4) |
+
+While a recipe is running (`auto_mode: true`), `set_timer`, `cancel_timer`, `set_target_temp`, `temp_up` and `temp_down` are rejected because the G30 is master of the process.
+
+**Not available** (not implemented by BrewLink): firmware version query, and recipe-level options (water-treatment alert, sparge counter/alert, boil power, skip-start) are fixed defaults. Recipe names are upper-cased, stripped to `A-Z 0-9 space - _`, and truncated to 19 characters on the G30.
 
 Completion is reported by `cmd_ack` (`status: success|error`, `error_code`; `261` = BLE transfer failed / device disconnected mid-transfer). G30 commands are paced by the gateway (150 ms between BLE packets); a recipe upload is a multi-packet sequence so `cmd_ack` arrives after the last packet.
 

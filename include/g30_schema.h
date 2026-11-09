@@ -30,6 +30,11 @@ typedef struct {
     bool     pump_active;
     bool     auto_mode;             // true = recipe / auto schedule, false = manual
     bool     ramp_active;           // true = heating to next step setpoint
+    bool     delayed_heat;          // true = delayed heating start is scheduled (Y notification)
+    bool     interrupted;           // W notification: process interrupted flag
+    bool     manual_power;          // W notification: manual power mode flag
+    bool     sparge_alert;          // W notification: sparge alert flag
+    uint8_t  error_code;            // E notification: last controller error code (0 = none)
     
     struct {
         bool     active;
@@ -103,7 +108,13 @@ typedef enum {
     G30_CMD_ACTION_LOAD_RECIPE          = 10,
     G30_CMD_ACTION_CANCEL_SESSION       = 11,
     G30_CMD_ACTION_PRESS_SET            = 12,
-    G30_CMD_ACTION_DISMISS_SPARGE_ALERT = 13
+    G30_CMD_ACTION_DISMISS_SPARGE_ALERT = 13,
+    G30_CMD_ACTION_TEMP_UP              = 14,
+    G30_CMD_ACTION_TEMP_DOWN            = 15,
+    G30_CMD_ACTION_DELAYED_HEAT         = 16,
+    G30_CMD_ACTION_DISCONNECT_MANUAL    = 17,
+    G30_CMD_ACTION_DISCONNECT_AUTO      = 18,
+    G30_CMD_ACTION_TOGGLE_TIMER         = 19  // raw G30 pause/resume toggle (G)
 } g30_command_action_t;
 
 typedef struct {
@@ -121,6 +132,10 @@ typedef struct {
         } heat;
         float            target_temp_c;
         uint16_t         timer_duration_min;
+        struct {
+            uint16_t minutes;
+            uint8_t  seconds;
+        } delayed_heat;
         g30_recipe_t recipe;
     } params;
 } g30_command_t;

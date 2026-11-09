@@ -127,6 +127,12 @@ static const char *action_enum_to_str(g30_command_action_t action) {
         case G30_CMD_ACTION_CANCEL_SESSION:       return "cancel_session";
         case G30_CMD_ACTION_PRESS_SET:            return "press_set";
         case G30_CMD_ACTION_DISMISS_SPARGE_ALERT: return "dismiss_sparge_alert";
+        case G30_CMD_ACTION_TOGGLE_TIMER:         return "toggle_timer";
+        case G30_CMD_ACTION_TEMP_UP:              return "temp_up";
+        case G30_CMD_ACTION_TEMP_DOWN:            return "temp_down";
+        case G30_CMD_ACTION_DELAYED_HEAT:         return "delayed_heat";
+        case G30_CMD_ACTION_DISCONNECT_MANUAL:    return "disconnect_manual";
+        case G30_CMD_ACTION_DISCONNECT_AUTO:      return "disconnect_auto";
         default:                              return "cmd";
     }
 }
@@ -176,7 +182,15 @@ static esp_err_t g30_drv_dispatch_command(equipment_slot_t *slot,
     if (slot->state.boiler.auto_mode &&
         (cmd->action == G30_CMD_ACTION_SET_TIMER ||
          cmd->action == G30_CMD_ACTION_CANCEL_TIMER ||
-         cmd->action == G30_CMD_ACTION_SET_TARGET_TEMP)) {
+         cmd->action == G30_CMD_ACTION_SET_TARGET_TEMP ||
+         cmd->action == G30_CMD_ACTION_TEMP_UP ||
+         cmd->action == G30_CMD_ACTION_TEMP_DOWN)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // The G30 only has a timer pause/resume TOGGLE (G); make pause/resume explicit.
+    if ((cmd->action == G30_CMD_ACTION_PAUSE_TIMER && slot->state.boiler.timer.paused) ||
+        (cmd->action == G30_CMD_ACTION_RESUME_TIMER && !slot->state.boiler.timer.paused)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -320,7 +334,7 @@ static esp_err_t g30_drv_format_telemetry_json(const equipment_slot_t *slot,
              "\"pump\":{\"active\":%s},"
              "\"timer\":{\"active\":%s,\"paused\":%s,\"remaining_seconds\":%lu,\"total_seconds\":%lu},"
              "\"stage\":{\"step_index\":%u,\"step_name\":\"%s\",\"auto_mode\":%s},"
-             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
+             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"},\"flags\":{\"delayed_heat\":%s,\"interrupted\":%s,\"manual_power\":%s,\"sparge_alert\":%s},\"error_code\":%u"
              "},\"timestamp_ms\":%lu}",
              mac_str, name_str, model_str,
              slot->rssi,
@@ -339,6 +353,11 @@ static esp_err_t g30_drv_format_telemetry_json(const equipment_slot_t *slot,
              st->interaction.required ? "true" : "false",
              st->interaction.code,
              st->interaction.message,
+             st->delayed_heat ? "true" : "false",
+             st->interrupted ? "true" : "false",
+             st->manual_power ? "true" : "false",
+             st->sparge_alert ? "true" : "false",
+             st->error_code,
              (unsigned long)timestamp_ms);
     return ESP_OK;
 }
