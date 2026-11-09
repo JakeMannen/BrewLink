@@ -9,10 +9,12 @@ This workspace operates under the authoritative rules and skills defined in [AGE
 *   [`04-github-flow.md`](.agents/rules/04-github-flow.md) — Git safety rules (never push to main, never force push, new session/feature on branch from updated main), branching standards, conventional commits, and PR verification.
 *   [`05-host-environment-protection.md`](.agents/rules/05-host-environment-protection.md) — Zero host installation policy (never install frameworks, addons, or tools on host; prompt user if blocked).
 
+*   [`06-per-equipment-schemas.md`](.agents/rules/06-per-equipment-schemas.md) — No shared schemas: each equipment model has its own schema (`<model>_schema.h`); adding new equipment requires adding its own schema.
+
 ### 2. Operational Skills
 *   [`vscode-platformio`](.agents/skills/vscode-platformio/SKILL.md) — VS Code Devcontainer, PlatformIO CLI builds, check, flash, monitor, size, and tests.
 *   [`ble-multi-central`](.agents/skills/ble-multi-central/SKILL.md) — NimBLE Central connecting to >= 3 peripherals simultaneously, GATT discovery, and queue handoff.
 *   [`outbound-relay`](.agents/skills/outbound-relay/SKILL.md) — WiFi station, MQTT client with LWT, HTTP client, and Core 1 dispatch task.
-*   [`grainfather-g30-ble`](.agents/skills/grainfather-g30-ble/SKILL.md) — Grainfather G30 Connect BLE protocol, 19-byte padded commands, notification parsing, recipe sequence, and unified schemas.
-*   [`brewing-recipe-schemas`](.agents/skills/brewing-recipe-schemas/SKILL.md) — BeerXML 1.0, BeerJSON, and BrewLink Unified Recipe data schemas crosswalk.
-*   [`brewlink-external-client`](.agents/skills/brewlink-external-client/SKILL.md) — External client connection runbook for WebSockets, MQTT, HTTP REST, 6-digit PIN pairing, and HMAC-SHA256 signing.
+*   [`grainfather-g30-ble`](.agents/skills/grainfather-g30-ble/SKILL.md) — Grainfather G30 Connect BLE protocol, 19-byte padded commands, notification parsing, recipe sequence, and the G30-specific schema (`g30_schema.h`).
+*   [`brewing-recipe-schemas`](.agents/skills/brewing-recipe-schemas/SKILL.md) — BeerXML 1.0, BeerJSON, and BrewLink G30 recipe schema crosswalk.
+*   [`brewlink-external-client`](.agents/skills/brewlink-external-client/SKILL.md) — External client connection runbook for WebSockets, MQTT, HTTP REST, 6-digit PIN pairing, and HMAC-SHA256 signing, and the per-equipment schemas (state, telemetry, controls, recipes) of every supported equipment model.

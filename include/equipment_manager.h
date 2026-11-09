@@ -34,7 +34,8 @@ typedef void* QueueHandle_t;
 #endif
 
 #include "config.h"
-#include "unified_schema.h"
+#include "g30_schema.h"
+#include "placeholder_schema.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,8 +69,8 @@ typedef struct {
 
     void      (*init_state)(equipment_slot_t *slot);
     esp_err_t (*parse_notification)(equipment_slot_t *slot, const uint8_t *data, size_t len);
-    esp_err_t (*dispatch_command)(equipment_slot_t *slot, const unified_command_t *cmd, eq_enqueue_ble_pkt_fn_t enqueue_fn);
-    esp_err_t (*dispatch_recipe)(equipment_slot_t *slot, const char *req_id, const unified_recipe_t *recipe, eq_enqueue_ble_pkt_fn_t enqueue_fn);
+    esp_err_t (*dispatch_command)(equipment_slot_t *slot, const g30_command_t *cmd, eq_enqueue_ble_pkt_fn_t enqueue_fn);
+    esp_err_t (*dispatch_recipe)(equipment_slot_t *slot, const char *req_id, const g30_recipe_t *recipe, eq_enqueue_ble_pkt_fn_t enqueue_fn);
     esp_err_t (*format_telemetry_json)(const equipment_slot_t *slot, uint32_t timestamp_ms, char *out_json, size_t max_len);
 } equipment_driver_t;
 
@@ -88,15 +89,15 @@ struct equipment_slot_s {
     const equipment_driver_t *driver;
 
     union {
-        unified_boiler_state_t        boiler;
-        unified_fermenter_state_t     fermenter;
-        unified_cooler_heater_state_t cooler;
+        g30_state_t        boiler;
+        placeholder_fermenter_state_t     fermenter;
+        placeholder_cooler_state_t cooler;
     } state;
 
     union {
-        unified_boiler_state_t        boiler;
-        unified_fermenter_state_t     fermenter;
-        unified_cooler_heater_state_t cooler;
+        g30_state_t        boiler;
+        placeholder_fermenter_state_t     fermenter;
+        placeholder_cooler_state_t cooler;
     } prev_state;
 
     uint32_t                  last_telemetry_pub_ms;
@@ -159,7 +160,7 @@ esp_err_t equipment_manager_process_notification(const uint8_t mac[6],
  * @param[out] out_resolved_mac Optional 6-byte buffer to receive the resolved target MAC
  * @return ESP_OK on success, ESP_ERR_NOT_FOUND if device is disconnected, ESP_ERR_INVALID_STATE if rejected
  */
-esp_err_t equipment_manager_dispatch_command(const unified_command_t *cmd, uint8_t out_resolved_mac[6]);
+esp_err_t equipment_manager_dispatch_command(const g30_command_t *cmd, uint8_t out_resolved_mac[6]);
 
 /**
  * @brief Dispatch a unified recipe to a target equipment device (fail-fast if disconnected)
@@ -173,7 +174,7 @@ esp_err_t equipment_manager_dispatch_command(const unified_command_t *cmd, uint8
 esp_err_t equipment_manager_dispatch_recipe(const uint8_t target_mac[6],
                                             equipment_type_t target_type,
                                             const char *req_id,
-                                            const unified_recipe_t *recipe,
+                                            const g30_recipe_t *recipe,
                                             uint8_t out_resolved_mac[6]);
 
 /**
@@ -192,7 +193,7 @@ esp_err_t equipment_manager_dispatch_recipe_ex(uint8_t target_slot,
                                                const uint8_t target_mac[6],
                                                equipment_type_t target_type,
                                                const char *req_id,
-                                               const unified_recipe_t *recipe,
+                                               const g30_recipe_t *recipe,
                                                uint8_t out_resolved_mac[6]);
 
 /**
@@ -209,7 +210,7 @@ esp_err_t equipment_manager_dispatch_recipe_to_slot(uint8_t target_slot,
                                                     const uint8_t target_mac[6],
                                                     equipment_type_t target_type,
                                                     const char *req_id,
-                                                    const unified_recipe_t *recipe,
+                                                    const g30_recipe_t *recipe,
                                                     uint8_t out_resolved_mac[6]);
 
 /**

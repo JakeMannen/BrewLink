@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
-#include "unified_schema.h"
+#include "g30_schema.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +24,7 @@ extern "C" {
  * @param[out] out_rssi Destination pointer for connected G30 RSSI (can be NULL)
  * @return ESP_OK on success, or ESP error code.
  */
-esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
+esp_err_t g30_controller_get_state(g30_state_t *out_state,
                                    bool *out_connected,
                                    uint8_t out_mac[6],
                                    int8_t *out_rssi);
@@ -37,7 +37,7 @@ esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
  *         ESP_ERR_NO_MEM if command queue is full,
  *         ESP_ERR_INVALID_ARG or ESP_ERR_NOT_SUPPORTED on encoding error.
  */
-esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd);
+esp_err_t g30_controller_dispatch_command(const g30_command_t *cmd);
 
 /**
  * @brief Thread-safe dispatch of an automated recipe sequence to the connected Grainfather G30
@@ -47,7 +47,7 @@ esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd);
  *         ESP_ERR_INVALID_ARG if recipe step counts or values are invalid,
  *         ESP_ERR_NO_MEM if command queue is full.
  */
-esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe);
+esp_err_t g30_controller_dispatch_recipe(const g30_recipe_t *recipe);
 
 #ifdef __cplusplus
 }

@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "config.h"
-#include "unified_schema.h"
+#include "g30_schema.h"
 #include "grainfather_g30.h"
 #include "ble_compatibility.h"
 #include "auth_manager.h"
@@ -92,7 +92,7 @@ void test_wifi_ap_configuration_defines(void) {
 // Grainfather G30 Notification Parsing Tests (BLE -> Gateway / WiFi)
 // =============================================================================
 void test_g30_parse_temperature_notification(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
 
     const uint8_t notif_data[] = "X65.0,64.8";
@@ -106,7 +106,7 @@ void test_g30_parse_temperature_notification(void) {
 }
 
 void test_g30_parse_system_state_notification(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
 
     // Y{Heat},{Pump},{Auto},{Ramp},{InterMode},{InterCode},{Stage},{Delayed}
@@ -127,7 +127,7 @@ void test_g30_parse_system_state_notification(void) {
 }
 
 void test_g30_parse_timer_notification(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
 
     // T{Active},{LeftMin},{TotalMin},{LeftSec}
@@ -143,7 +143,7 @@ void test_g30_parse_timer_notification(void) {
 }
 
 void test_g30_parse_power_notification(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
 
     // W{PwrPct},{Paused},{StepMash},{Interrupted},{ManualPwr},{SpargeAlert}
@@ -158,7 +158,7 @@ void test_g30_parse_power_notification(void) {
 }
 
 void test_g30_parse_interaction_notification(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
 
     // I1 is ALWAYS "Add mash water & Press SET to start heating", even when current temp (25C) is within 1C of target (26C)
@@ -194,7 +194,7 @@ void test_g30_parse_interaction_notification(void) {
 }
 
 void test_g30_parse_boil_temp_notification(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
 
     const uint8_t notif_data[] = "C99.5";
@@ -223,9 +223,9 @@ void test_g30_format_padded_cmd_exact_19_bytes(void) {
 
 void test_g30_encode_pump_command(void) {
     char buf[G30_COMMAND_LEN + 1];
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_PUMP;
+    cmd.action = G30_CMD_ACTION_SET_PUMP;
 
     // Pump ON -> "L1" + 17 spaces
     cmd.params.pump_state = true;
@@ -242,9 +242,9 @@ void test_g30_encode_pump_command(void) {
 
 void test_g30_encode_heat_command(void) {
     char buf[G30_COMMAND_LEN + 1];
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_HEAT;
+    cmd.action = G30_CMD_ACTION_SET_HEAT;
 
     // Heat ON -> "K1" + 17 spaces
     cmd.params.heat.heat_state = true;
@@ -261,9 +261,9 @@ void test_g30_encode_heat_command(void) {
 
 void test_g30_encode_target_temperature(void) {
     char buf[G30_COMMAND_LEN + 1];
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_TARGET_TEMP;
+    cmd.action = G30_CMD_ACTION_SET_TARGET_TEMP;
 
     // Integer temp 65 -> "$65," + 15 spaces
     cmd.params.target_temp_c = 65.0f;
@@ -280,30 +280,30 @@ void test_g30_encode_target_temperature(void) {
 
 void test_g30_encode_timer_commands(void) {
     char buf[G30_COMMAND_LEN + 1];
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
 
     // Set timer 60 min -> "S60" + 16 spaces
-    cmd.action = CMD_ACTION_SET_TIMER;
+    cmd.action = G30_CMD_ACTION_SET_TIMER;
     cmd.params.timer_duration_min = 60;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
     TEST_ASSERT_EQUAL_STRING("S60                ", buf);
 
     // Pause / Resume -> "G" + 18 spaces
-    cmd.action = CMD_ACTION_PAUSE_TIMER;
+    cmd.action = G30_CMD_ACTION_PAUSE_TIMER;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("G                  ", buf);
 
     // Cancel timer -> "C" + 18 spaces
-    cmd.action = CMD_ACTION_CANCEL_TIMER;
+    cmd.action = G30_CMD_ACTION_CANCEL_TIMER;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("C                  ", buf);
 }
 
 void test_g30_encode_recipe_commands(void) {
     char buf[G30_COMMAND_LEN + 1];
-    unified_recipe_t recipe;
+    g30_recipe_t recipe;
     memset(&recipe, 0, sizeof(recipe));
     recipe.boil_time_min = 75;
     recipe.mash_step_count = 2;
@@ -336,7 +336,7 @@ void test_g30_encode_recipe_commands(void) {
     TEST_ASSERT_EQUAL_STRING("15,                ", buf);
 
     // Mash Step 1: 65C for 60 min -> "65:60              "
-    unified_mash_step_t step1 = {.temp_c = 65.0f, .duration_min = 60};
+    g30_mash_step_t step1 = {.temp_c = 65.0f, .duration_min = 60};
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_recipe_mash_step(&step1, buf));
     TEST_ASSERT_EQUAL_UINT32(19, strlen(buf));
     TEST_ASSERT_EQUAL_STRING("65:60              ", buf);
@@ -494,7 +494,7 @@ void test_compatibility_full_advertisement_check(void) {
 // G30 Web Controller & Recipe Conversion Validation Tests
 // =============================================================================
 void test_g30_web_recipe_conversion_and_encoding(void) {
-    unified_recipe_t recipe;
+    g30_recipe_t recipe;
     memset(&recipe, 0, sizeof(recipe));
     strncpy(recipe.name, "Newcastle Brown Ale", sizeof(recipe.name) - 1);
     recipe.boil_time_min = 60;
@@ -545,11 +545,11 @@ void test_g30_web_recipe_conversion_and_encoding(void) {
 
 void test_g30_web_control_actions_mapping(void) {
     char buf[G30_COMMAND_LEN + 1];
-    unified_command_t cmd;
+    g30_command_t cmd;
 
     // Pump control
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_PUMP;
+    cmd.action = G30_CMD_ACTION_SET_PUMP;
     cmd.params.pump_state = true;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("L1                 ", buf);
@@ -560,7 +560,7 @@ void test_g30_web_control_actions_mapping(void) {
 
     // Heat control
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_HEAT;
+    cmd.action = G30_CMD_ACTION_SET_HEAT;
     cmd.params.heat.heat_state = true;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("K1                 ", buf);
@@ -571,7 +571,7 @@ void test_g30_web_control_actions_mapping(void) {
 
     // Set target temp decimal & integer
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_TARGET_TEMP;
+    cmd.action = G30_CMD_ACTION_SET_TARGET_TEMP;
     cmd.params.target_temp_c = 65.5f;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("$65.5,             ", buf);
@@ -582,31 +582,31 @@ void test_g30_web_control_actions_mapping(void) {
 
     // Acknowledge interaction prompt
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_ACK_INTERACTION;
+    cmd.action = G30_CMD_ACTION_ACK_INTERACTION;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("I                  ", buf);
 
     // Press SET command
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_PRESS_SET;
+    cmd.action = G30_CMD_ACTION_PRESS_SET;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("T                  ", buf);
 
     // Pause/Resume timer command
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_PAUSE_TIMER;
+    cmd.action = G30_CMD_ACTION_PAUSE_TIMER;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("G                  ", buf);
 
     // Cancel timer command
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_CANCEL_TIMER;
+    cmd.action = G30_CMD_ACTION_CANCEL_TIMER;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, buf));
     TEST_ASSERT_EQUAL_STRING("C                  ", buf);
 }
 
 void test_g30_parse_initial_strike_water_prompt(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
     // Reproduces Augustiner Lagerbier Hell Clone scenario: Current temp = 25C, Step 1 = 26C
     state.target_temp_c = 26.0f;
@@ -647,7 +647,7 @@ void test_g30_parse_initial_strike_water_prompt(void) {
 }
 
 void test_g30_stage_name_mapping(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
@@ -740,7 +740,7 @@ void test_g30_stage_name_mapping(void) {
 }
 
 void test_g30_parse_timer_real_protocol_minutes_and_seconds(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
 
@@ -774,7 +774,7 @@ void test_g30_parse_timer_real_protocol_minutes_and_seconds(void) {
 }
 
 void test_g30_master_recipe_full_lifecycle(void) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     memset(&state, 0, sizeof(state));
     state.boil_temp_c = 100.0f;
     g30_notification_type_t type = G30_NOTIF_UNKNOWN;
@@ -885,13 +885,13 @@ void test_g30_master_recipe_full_lifecycle(void) {
 
     // Verify dismiss_alert ('A') and dismiss_sparge_alert ('V') command encodings
     char cmd_buf[G30_COMMAND_LEN + 1];
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_DISMISS_ALERT;
+    cmd.action = G30_CMD_ACTION_DISMISS_ALERT;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, cmd_buf));
     TEST_ASSERT_EQUAL_STRING("A                  ", cmd_buf);
 
-    cmd.action = CMD_ACTION_DISMISS_SPARGE_ALERT;
+    cmd.action = G30_CMD_ACTION_DISMISS_SPARGE_ALERT;
     TEST_ASSERT_EQUAL_INT(ESP_OK, g30_encode_command(&cmd, cmd_buf));
     TEST_ASSERT_EQUAL_STRING("V                  ", cmd_buf);
 
@@ -1072,7 +1072,7 @@ void test_equipment_manager_fail_fast_when_disconnected(void) {
     equipment_manager_set_enqueue_override(mock_enqueue_ble_pkt);
     s_captured_pkt_count = 0;
 
-    unified_recipe_t recipe;
+    g30_recipe_t recipe;
     memset(&recipe, 0, sizeof(recipe));
     strncpy(recipe.name, "Offline IPA", sizeof(recipe.name) - 1);
     recipe.boil_time_min = 60;
@@ -1102,7 +1102,7 @@ void test_equipment_manager_multi_device_recipe_dispatch(void) {
 
     // 1. Dispatch Boiler Recipe (2 mash steps, 2 boil additions -> 4 + 2 + 2 = 8 BLE packets)
     s_captured_pkt_count = 0;
-    unified_recipe_t recipe;
+    g30_recipe_t recipe;
     memset(&recipe, 0, sizeof(recipe));
     strncpy(recipe.name, "West Coast IPA", sizeof(recipe.name) - 1);
     recipe.boil_time_min = 60;
@@ -1186,9 +1186,9 @@ void test_equipment_manager_unique_names_and_power_cycle_persistence(void) {
 
     // Verify targeting the second boiler specifically by its unique target_name
     s_captured_pkt_count = 0;
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
-    cmd.action = CMD_ACTION_SET_PUMP;
+    cmd.action = G30_CMD_ACTION_SET_PUMP;
     cmd.params.pump_state = true;
     strncpy(cmd.target_name, "Grainfather G30 Connect-8B23", sizeof(cmd.target_name) - 1);
 

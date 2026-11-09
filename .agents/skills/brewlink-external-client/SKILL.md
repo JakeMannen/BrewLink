@@ -1,17 +1,30 @@
 ---
 name: brewlink-external-client
 description: >-
-  Connect external systems, recipe managers, and dashboards to BrewLink via WebSockets, MQTT, and HTTP REST, including UDP/MQTT broadcast discovery, code-free push-button pairing, HMAC-SHA256 authentication, and recipe uploading.
+  Consumer guide for using BrewLink from external systems (recipe managers, dashboards, Home Assistant, bots, CLIs). Covers discovery, push-button pairing, authentication, the WebSocket / MQTT / HTTP REST APIs, and the per-equipment data schemas (state, telemetry, controls, recipes) of every supported connected equipment model (currently Grainfather G30 Connect).
 ---
 
-# BrewLink External Client Integration Skill
+# BrewLink Consumer Skill: Using BrewLink & Its Equipment Schemas
 
-This skill is the authoritative integration manual and URL reference for **external systems** (recipe managers like Brewfather or BeerSmith, cloud dashboards, Home Assistant, automation bots, and CLI tools) connecting to a **BrewLink** IoT Gateway.
+Use this skill when you are building or operating **something that talks to a BrewLink gateway** (not firmware development). It tells you how to find and pair with BrewLink, how to authenticate, how to list the connected brewing equipment, and, for each supported equipment model, exactly which state, telemetry, control actions, and recipe format to use.
 
-It contains only the endpoints, URLs, discovery beacons, topics, and data formats relevant to external clients. Internal gateway setup functions (such as Wi-Fi onboarding or BLE peripheral scanning) are omitted.
+It documents only what external clients see. Internal gateway details (Wi-Fi onboarding, BLE scanning, NimBLE, task layout) are intentionally omitted.
+
+## 0. Mental Model
+
+* **Gateway**: one BrewLink ESP32 (`gateway_id`, 12-char uppercase hex). Paired clients talk to it over HTTP REST, WebSocket (`/ws`), or MQTT.
+* **Equipment**: up to **3** simultaneously connected Bluetooth devices, addressed by `slot` (1..3), unique `name`, `equipment_type`, or `mac`. List them via `GET /api/equipment` (or WebSocket / MQTT `list_equipment`).
+* **No shared schema**: the transport envelope (`req_id`, `action`, `equipment_type`, `slot`, `params`, events such as `telemetry` / `cmd_ack`) is common, but **the contents of `state`, `params`, and `recipe` are defined per equipment model**. Always read the `model` field of the equipment entry and use that model's schema in [Section 6](#6-equipment-schemas-per-model).
+* **Workflow**: discover → pair (get `api_token`) → `GET /api/equipment` → pick a device (check `model` and `capabilities`) → read telemetry / send controls / upload recipe using that model's schema → watch `cmd_ack`.
+* **Fail-fast**: commands to a disconnected device return `409 EQUIPMENT_OFFLINE` immediately; nothing is queued.
+
+| Supported model (`model`) | `equipment_type` | Schema section |
+| :--- | :---: | :--- |
+| Grainfather G30 Connect | `boiler` | [6.1](#61-grainfather-g30-connect-boiler) |
+
+*(`fermenter` and `cooler` types are reserved; no real model is supported yet. When a model is added it gets its own subsection in Section 6.)*
 
 ---
-
 ## 1. Network Broadcast Discovery & Push-Button Pairing
 
 Because the ESP32 gateway operates headlessly when the user holds the physical **`BOOT` button (`GPIO 0`) for 3 seconds**, BrewLink supports **code-free push-button pairing** with automatic network broadcast discovery.
@@ -49,7 +62,7 @@ When an external client receives this beacon, it immediately calls `POST` on `cl
 
 All REST endpoints operate on `http://<gateway-ip>/`. Protected endpoints require authentication once paired:
 * Header: `Authorization: Bearer <api_token>`
-* Custom Header fallback: `X-BrewLink-Token: <api_token>`
+* Custom Header fallback: `x-BrewLink-Token: <api_token>`
 
 ### 2.1. External Client URL Catalog
 
@@ -59,8 +72,8 @@ All REST endpoints operate on `http://<gateway-ip>/`. Protected endpoints requir
 | **`GET`** | `/api/pair/status` | None | **Pairing state & client registry**: Verify if clients are paired (`clients` array) or if a pairing window is currently open. |
 | **`POST`** | `/api/pair/delete` | None | **Delete paired client**: Remove a paired external client by `client_name` and immediately revoke its `api_token`. |
 | **`GET`** | `/api/equipment` | Bearer | **Equipment discovery**: Enumerate all connected brewing devices, MACs, types, and live states. |
-| **`POST`** | `/api/equipment/recipe` | Bearer | **Recipe upload**: Transmit an automated recipe (mash/boil/ferment) to target equipment. |
-| **`POST`** | `/api/equipment/control` | Bearer | **Hardware control**: Send direct commands (pump, heat, setpoint, timer, alert ack). |
+| **`POST`** | `/api/equipment/recipe` | Bearer | **Recipe upload**: Transmit an automated recipe to target equipment (format depends on the model, see Section 6). |
+| **`POST`** | `/api/equipment/control` | Bearer | **Hardware control**: Send direct commands; supported actions depend on the equipment model (see Section 6). |
 | **`GET`** | `/api/status` | None | **Gateway telemetry**: Check gateway online state, active BLE connections, and firmware version. |
 
 ---
@@ -69,7 +82,7 @@ All REST endpoints operate on `http://<gateway-ip>/`. Protected endpoints requir
 
 #### `POST /api/pair/claim` — Claim Push-Button Pairing Session (Code-Free)
 When the 60-second pairing window is open (triggered via physical `BOOT` button hold for 3s), the external client claims the session **without needing a PIN** (physical button press acts as proof of authorization, with immediate single-claim lockout).
-* **Unique Client Naming (`<presented_name>-<suffix>`)**: BrewLink takes the `"client_name"` presented by the external client (e.g., `"Brewfather"`), appends a random 4-character hex suffix `-<XXXX>` (e.g., `"Brewfather-A4F2"`), and guarantees that the resulting name is unique across all paired external clients (up to 8 clients stored in NVS).
+* **Unique Client Naming (`<presented_name>-<suffix>`)**: BrewLink takes the `"client_name"` presented by the external client (e.g., `"Brewfather"`), appends a random 4-character hex suffix `-<xxxx>` (e.g., `"Brewfather-A4F2"`), and guarantees that the resulting name is unique across all paired external clients (up to 8 clients stored in NVS).
 * **Deletable Clients**: Any paired external client can be deleted from the BrewLink Web UI (`Client Pairing` tab) or via `POST /api/pair/delete` (`{"client_name": "Brewfather-A4F2"}`), which immediately revokes its `api_token`.
 
 * **Request (Code-Free Push-Button Claim)**:
@@ -175,7 +188,7 @@ Upload a recipe for automated execution. External clients can target equipment i
 3. **By `slot`** (`1`, `2`, or `3` from the equipment list) — no `target_mac` needed.
 4. **By `target_mac`** (optional if you prefer MAC addressing).
 
-* **Request**:
+* **Request** (example uses the G30 recipe schema, Section 6.1.4):
   ```http
   POST /api/equipment/recipe HTTP/1.1
   Host: <gateway-ip>
@@ -198,12 +211,7 @@ Upload a recipe for automated execution. External clients can target equipment i
           {"name": "Mash In", "temp_c": 65.0, "duration_min": 60},
           {"name": "Mash Out", "temp_c": 75.0, "duration_min": 10}
         ],
-        "boil_additions_min": [60, 15],
-        "fermentation_steps": [
-          {"name": "Primary", "temp_c": 19.5, "duration_hours": 240}
-        ],
-        "target_og_sg": 1.065,
-        "target_fg_sg": 1.012
+        "boil_additions_min": [60, 15]
       }
     }
   }
@@ -249,7 +257,7 @@ Send immediate hardware commands targeting by `equipment_type` or `slot` (or opt
     }
   }
   ```
-* **Supported Actions & Parameters**:
+* **Supported Actions & Parameters** (shown for the G30 `boiler`; other models define their own in Section 6):
   * `set_pump`: `params: {"state": true|false}`
   * `set_heat`: `params: {"state": true|false, "power_pct": 0-100}`
   * `set_target_temp`: `params: {"temp_c": 65.5}`
@@ -347,7 +355,7 @@ The gateway broadcasts real-time events to all authenticated WebSocket clients:
        "heating": {"active": true, "power_pct": 100, "ramping": false},
        "pump": {"active": true},
        "timer": {"active": true, "paused": false, "remaining_seconds": 2340, "total_seconds": 3600},
-       "stage": {"step_index": 1, "auto_mode": true},
+       "stage": {"step_index": 1, "step_name": "Mash Step 1", "auto_mode": true},
        "interaction": {"required": false, "code": 0, "message": "Normal operation"}
      },
      "timestamp_ms": 1459200
@@ -441,7 +449,7 @@ Because MQTT command topics can be intercepted on shared brokers, all commands p
 ## 5. Client Implementation Cheatsheets
 
 ### 5.1. Reference Python CLI (`tools/beerxml_uploader.py`)
-Use the bundled reference client to auto-discover via UDP `:53540`, pair without a code, list connected Bluetooth devices, convert BeerXML files, and upload without needing a MAC address:
+Use the bundled reference client to auto-discover via UDP `:53540`, pair without a code, list connected Bluetooth devices, convert BeerxML files, and upload without needing a MAC address:
 ```bash
 # 1. Hold physical BOOT button on ESP32 for 3s, then auto-discover & claim pairing (zero code, no IP needed)
 python3 tools/beerxml_uploader.py --pair --client-name "MyLaptop"
@@ -449,7 +457,7 @@ python3 tools/beerxml_uploader.py --pair --client-name "MyLaptop"
 # 2. List all paired/connected Bluetooth devices on BrewLink (returns slot 1..3, name, equipment_type, mac)
 python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --list-devices
 
-# 3. Upload BeerXML recipe to Grainfather G30 by equipment_type (default: boiler), --name, or --slot 1 (no MAC needed)
+# 3. Upload BeerxML recipe to Grainfather G30 by equipment_type (default: boiler), --name, or --slot 1 (no MAC needed)
 python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --xml recipe.xml
 python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --name "Grainfather G30 Connect" --xml recipe.xml
 python3 tools/beerxml_uploader.py --host 192.168.1.50 --token bl_8f3a9e2... --slot 1 --xml recipe.xml
@@ -520,3 +528,106 @@ payload = json.dumps({
 topic = f"brewlink/{TOPIC_KEY}/{GATEWAY_ID}/equipment/{TARGET_MAC}/cmd"
 client.publish(topic, payload, qos=1)
 ```
+
+---
+
+## 6. Equipment Schemas (Per Model)
+
+Each supported equipment model has **its own schema**; schemas are never shared between models. Identify the model from the `model` field in `GET /api/equipment`, the `connected` event, or telemetry, then use the matching subsection.
+
+### 6.1. Grainfather G30 Connect (`boiler`)
+
+* `model`: `"Grainfather G30 Connect"` (telemetry may report `"Grainfather G30"`)
+* `equipment_type`: `"boiler"` (default target when `equipment_type` is omitted)
+* Capabilities: `recipe_upload`, `mash_profile`, `pump_control`, `heat_control`; `fermentation_profile` is **false**.
+* Firmware schema: `include/g30_schema.h` (`g30_state_t`, `g30_command_t`, `g30_recipe_t`).
+
+#### 6.1.1. State (`state` in `GET /api/equipment`)
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `current_temp_c` | number | Current wort temperature (°C) |
+| `target_temp_c` | number | Active setpoint (°C) |
+| `boil_temp_c` | number | Configured boil temperature (default 100) |
+| `heat_active` | bool | Heating element on |
+| `heat_power_pct` | int 0..100 | Heater power |
+| `pump_active` | bool | Pump running |
+| `auto_mode` | bool | `true` = running a recipe, `false` = manual |
+| `ramp_active` | bool | Heating up to the next step's setpoint |
+| `timer.active/paused` | bool | Timer state |
+| `timer.remaining_seconds/total_seconds` | int | Timer progress |
+| `stage.step_index` | int | Controller stage (1..N = mash steps) |
+| `stage.step_name` | string (≤23) | e.g. `Add Strike Water`, `Add Grain`, `Mash Step N`, `Sparge`, `Boiling`, `Cooling`, `Idle`, `Manual Mode` |
+| `interaction.required` | bool | G30 is waiting for the brewer |
+| `interaction.code` | int | See table below |
+| `interaction.message` | string (≤63) | Human-readable prompt |
+
+**Interaction codes**
+
+| Code | Meaning | Respond with |
+| :---: | :--- | :--- |
+| 0 | Normal operation | – |
+| 1 | Add mash water, then press SET to start heating | `press_set` |
+| 2 | Strike temperature reached: add grain | `ack_interaction` |
+| 3 | Mash finished: sparge alert | `dismiss_sparge_alert` / `ack_interaction` |
+| 4 | Sparge: add sparge water, SET skips to boil | `press_set` / `dismiss_sparge_alert` |
+| 5 | Boil addition alert (hops/adjuncts) | `dismiss_alert` |
+| 6 | Boil finished: start cooling | `ack_interaction` |
+
+#### 6.1.2. Telemetry (WebSocket `event:"telemetry"`, MQTT `.../equipment/{MAC}/telemetry`)
+
+```json
+{
+  "event": "telemetry", "mac": "C44F331A8B22", "name": "Grainfather G30 Connect",
+  "equipment_type": "boiler", "model": "Grainfather G30 Connect", "rssi": -60,
+  "state": {
+    "temperature": {"current_c": 65.0, "target_c": 65.0, "boil_c": 100.0},
+    "heating": {"active": true, "power_pct": 100, "ramping": false},
+    "pump": {"active": true},
+    "timer": {"active": true, "paused": false, "remaining_seconds": 2340, "total_seconds": 3600},
+    "stage": {"step_index": 1, "step_name": "Mash Step 1", "auto_mode": true},
+    "interaction": {"required": false, "code": 0, "message": "Normal operation"}
+  },
+  "timestamp_ms": 1459200
+}
+```
+Note: telemetry groups fields (`temperature`, `heating`, `pump`, ...) while `GET /api/equipment` returns the flat state fields of 6.1.1. Same data, different shape.
+
+#### 6.1.3. Control actions (`POST /api/equipment/control`, WebSocket, or MQTT `.../cmd`)
+
+| `action` | `params` | Effect |
+| :--- | :--- | :--- |
+| `set_pump` | `{"state": bool}` | Pump on/off |
+| `set_heat` | `{"state": bool, "power_pct": 0-100}` | Heater on/off + power |
+| `set_target_temp` | `{"temp_c": number}` | Setpoint |
+| `set_timer` | `{"duration_min": int}` | Start timer |
+| `pause_timer` / `resume_timer` / `cancel_timer` | none | Timer control |
+| `press_set` | none | Press the physical SET button (advance prompt / start strike heating) |
+| `ack_interaction` | none | Acknowledge a prompt (e.g. grain added) |
+| `dismiss_alert` | none | Dismiss boil / hop addition alert |
+| `dismiss_sparge_alert` | none | Dismiss sparge prompt |
+| `cancel_session` | none | Abort the active recipe |
+| `load_recipe` | `{"recipe": {...}}` | Upload recipe (6.1.4) |
+
+Completion is reported by `cmd_ack` (`status: success|error`, `error_code`; `261` = BLE transfer failed / device disconnected mid-transfer). G30 commands are paced by the gateway (150 ms between BLE packets); a recipe upload is a multi-packet sequence so `cmd_ack` arrives after the last packet.
+
+#### 6.1.4. Recipe (`params.recipe` for `load_recipe`)
+
+| Field | Type | Limits | Notes |
+| :--- | :--- | :--- | :--- |
+| `name` | string | ≤ 31 chars | Recipe name |
+| `boil_time_min` | int | – | Boil duration |
+| `hop_stand_min` | int | – | Hop stand duration |
+| `mash_water_l` | number | – | Strike water volume (L) |
+| `sparge_water_l` | number | – | Sparge water volume (L) |
+| `mash_steps[]` | `{name?, temp_c, duration_min}` | max **8** | Defaults 65 °C / 60 min if omitted |
+| `boil_additions_min[]` | int[] | max **8** | Minutes remaining in boil at which each addition alert fires |
+| `fermentation_steps[]`, `target_og_sg`, `target_fg_sg` | – | – | Accepted but **ignored by the G30** (it is not a fermenter) |
+
+BrewLink transmits the recipe as provided and does not validate brewing sense. Recipes from BeerXML/BeerJSON can be converted with `tools/beerxml_uploader.py` (or the `brewing-recipe-schemas` skill). Typical brew-day flow after upload: `interaction.code 1` → `press_set` → heat to strike → code 2 → `ack_interaction` → mash steps → sparge prompts (3/4) → boil with addition alerts (5) → cooling (6).
+
+---
+
+## 7. Adding Another Equipment Model (for consumers of future versions)
+
+When BrewLink adds support for a new model (for example a fermenter), it ships with its own subsection in Section 6 documenting its state, telemetry, control actions, and recipe/profile. Never assume a fermenter or cooler uses G30 field names; read the `model` and `capabilities` of each entry in the equipment list and use that model's schema only.

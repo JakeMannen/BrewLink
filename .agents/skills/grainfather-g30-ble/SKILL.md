@@ -1,7 +1,7 @@
 ---
 name: grainfather-g30-ble
 description: >-
-  Communicate with the Grainfather G30 Connect brewing controller via Bluetooth Low Energy (BLE), including GATT discovery, notification parsing, 19-byte space-padded command encoding, recipe transmission, and bidirectional integration with BrewLink unified data schemas.
+  Communicate with the Grainfather G30 Connect brewing controller via Bluetooth Low Energy (BLE), including GATT discovery, notification parsing, 19-byte space-padded command encoding, recipe transmission, and bidirectional integration with the G30-specific BrewLink schema (`include/g30_schema.h`).
 ---
 
 # Grainfather G30 BLE Communication Skill
@@ -191,11 +191,11 @@ The 7th parameter in the `Y` notification represents the controller's active bre
 
 ---
 
-## 5. Unified Data Schemas (BrewLink Multi-Equipment Architecture)
+## 5. G30 Data Schema (Per-Equipment Architecture)
 
-To ensure the G30 seamlessly operates alongside fermenters, chillers, and future equipment, telemetry and commands are mapped to the **BrewLink Unified Schema**.
+BrewLink has no shared schemas. The G30 owns its schema in `include/g30_schema.h` (`g30_state_t`, `g30_command_t`, `g30_recipe_t`, `G30_CMD_ACTION_*`). Other equipment models (fermenters, coolers, other boilers) must define their own `<model>_schema.h` (see `.agents/rules/06-per-equipment-schemas.md`).
 
-### 5.1. Equipment Category Taxonomy
+### 5.1. Equipment Category Taxonomy (`equipment_types.h`, routing only)
 ```c
 typedef enum {
     EQUIPMENT_TYPE_UNKNOWN       = 0,
@@ -205,7 +205,7 @@ typedef enum {
 } equipment_type_t;
 ```
 
-### 5.2. Unified Boiler State Schema (C Struct)
+### 5.2. G30 State Schema (C Struct)
 ```c
 typedef struct {
     float    current_temp_c;
@@ -232,7 +232,7 @@ typedef struct {
         char     message[48];       // User-readable instruction
     } interaction;
     uint32_t last_updated_ms;
-} unified_boiler_state_t;
+} g30_state_t;
 ```
 
 ### 5.3. Outbound Telemetry JSON (BLE -> WiFi / MQTT)
@@ -334,9 +334,9 @@ flowchart TD
     subgraph Core1["Core 1 (Application & Parsing)"]
         Telem_Queue["s_telemetry_queue<br/>(Raw BLE Notifications)"]
         Cmd_Queue["s_ble_cmd_queue<br/>(19-Byte Padded BLE Cmds)"]
-        G30_Parser["G30 Notification Parser<br/>(ASCII -> Unified Struct)"]
+        G30_Parser["G30 Notification Parser<br/>(ASCII -> g30_state_t)"]
         Cmd_Dispatcher["MQTT Command Dispatcher<br/>(JSON -> G30 Cmd Encoder)"]
-        Unified_State["Cached Unified Boiler State"]
+        Unified_State["Cached G30 State"]
     end
 
     subgraph Dashboards["External Cloud / Dashboard"]
@@ -367,7 +367,7 @@ flowchart TD
 #include <stdlib.h>
 #include <string.h>
 
-esp_err_t g30_parse_notification(const uint8_t *data, size_t len, unified_boiler_state_t *state) {
+esp_err_t g30_parse_notification(const uint8_t *data, size_t len, g30_state_t *state) {
     if (data == NULL || len == 0 || state == NULL) {
         return ESP_ERR_INVALID_ARG;
     }

@@ -39,7 +39,7 @@ const char* g30_get_interaction_message(uint8_t code) {
 }
 
 // Resolve contextual interaction message and stage badge from G30 controller telemetry
-static void g30_resolve_interaction_message(unified_boiler_state_t *state, uint8_t code) {
+static void g30_resolve_interaction_message(g30_state_t *state, uint8_t code) {
     if (state == NULL) {
         return;
     }
@@ -172,7 +172,7 @@ esp_err_t g30_format_padded_cmd(const char *cmd_str, char out_buf[G30_COMMAND_LE
 // =============================================================================
 // Command Encoder (Unified Command -> G30 19-Byte Command)
 // =============================================================================
-esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMMAND_LEN + 1]) {
+esp_err_t g30_encode_command(const g30_command_t *cmd, char out_buf[G30_COMMAND_LEN + 1]) {
     if (cmd == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -181,15 +181,15 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
     memset(raw_cmd, 0, sizeof(raw_cmd));
 
     switch (cmd->action) {
-        case CMD_ACTION_SET_PUMP:
+        case G30_CMD_ACTION_SET_PUMP:
             snprintf(raw_cmd, sizeof(raw_cmd), "%s", cmd->params.pump_state ? "L1" : "L0");
             break;
 
-        case CMD_ACTION_SET_HEAT:
+        case G30_CMD_ACTION_SET_HEAT:
             snprintf(raw_cmd, sizeof(raw_cmd), "%s", cmd->params.heat.heat_state ? "K1" : "K0");
             break;
 
-        case CMD_ACTION_SET_TARGET_TEMP:
+        case G30_CMD_ACTION_SET_TARGET_TEMP:
             // Format: "$XX.X," or "$XX," - trailing comma is mandatory
             if ((int)(cmd->params.target_temp_c * 10) % 10 == 0) {
                 snprintf(raw_cmd, sizeof(raw_cmd), "$%u,", (unsigned int)cmd->params.target_temp_c);
@@ -198,36 +198,36 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
             }
             break;
 
-        case CMD_ACTION_SET_TIMER:
+        case G30_CMD_ACTION_SET_TIMER:
             snprintf(raw_cmd, sizeof(raw_cmd), "S%u", cmd->params.timer_duration_min);
             break;
 
-        case CMD_ACTION_PAUSE_TIMER:
-        case CMD_ACTION_RESUME_TIMER:
+        case G30_CMD_ACTION_PAUSE_TIMER:
+        case G30_CMD_ACTION_RESUME_TIMER:
             snprintf(raw_cmd, sizeof(raw_cmd), "G");
             break;
 
-        case CMD_ACTION_CANCEL_TIMER:
+        case G30_CMD_ACTION_CANCEL_TIMER:
             snprintf(raw_cmd, sizeof(raw_cmd), "C");
             break;
 
-        case CMD_ACTION_ACK_INTERACTION:
+        case G30_CMD_ACTION_ACK_INTERACTION:
             snprintf(raw_cmd, sizeof(raw_cmd), "I");
             break;
 
-        case CMD_ACTION_DISMISS_ALERT:
+        case G30_CMD_ACTION_DISMISS_ALERT:
             snprintf(raw_cmd, sizeof(raw_cmd), "A");
             break;
 
-        case CMD_ACTION_PRESS_SET:
+        case G30_CMD_ACTION_PRESS_SET:
             snprintf(raw_cmd, sizeof(raw_cmd), "T");
             break;
 
-        case CMD_ACTION_DISMISS_SPARGE_ALERT:
+        case G30_CMD_ACTION_DISMISS_SPARGE_ALERT:
             snprintf(raw_cmd, sizeof(raw_cmd), "V");
             break;
 
-        case CMD_ACTION_CANCEL_SESSION:
+        case G30_CMD_ACTION_CANCEL_SESSION:
             snprintf(raw_cmd, sizeof(raw_cmd), "Q1");
             break;
 
@@ -243,7 +243,7 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
 // =============================================================================
 
 // Line 1: Main Header: R{boil_min},{step_count},{mash_water},{sparge_water},
-esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]) {
+esp_err_t g30_encode_recipe_header(const g30_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]) {
     if (recipe == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -322,7 +322,7 @@ esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out
 }
 
 // Mash Step: {temp_c}:{duration_min}
-esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]) {
+esp_err_t g30_encode_recipe_mash_step(const g30_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]) {
     if (step == NULL || out_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -340,7 +340,7 @@ esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_
 // Notification Parser (BLE Notification ASCII -> Unified State)
 // =============================================================================
 esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
-                                 unified_boiler_state_t *state,
+                                 g30_state_t *state,
                                  g30_notification_type_t *out_type) {
     if (data == NULL || len == 0 || state == NULL) {
         return ESP_ERR_INVALID_ARG;

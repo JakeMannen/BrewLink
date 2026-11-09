@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "unified_schema.h"
+#include "g30_schema.h"
 
 #ifdef __cplusplus
 extern "C" {

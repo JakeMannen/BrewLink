@@ -23,7 +23,7 @@ typedef int esp_err_t;
 #endif
 #endif
 
-#include "unified_schema.h"
+#include "g30_schema.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,7 +71,7 @@ typedef enum {
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG or ESP_ERR_NOT_SUPPORTED on parse failure
  */
 esp_err_t g30_parse_notification(const uint8_t *data, size_t len,
-                                 unified_boiler_state_t *state,
+                                 g30_state_t *state,
                                  g30_notification_type_t *out_type);
 
 /**
@@ -88,7 +88,7 @@ esp_err_t g30_format_padded_cmd(const char *cmd_str, char out_buf[G30_COMMAND_LE
  * @param out_buf Buffer of at least 20 bytes
  * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if action not mapped
  */
-esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMMAND_LEN + 1]);
+esp_err_t g30_encode_command(const g30_command_t *cmd, char out_buf[G30_COMMAND_LEN + 1]);
 
 /**
  * @brief Encode the recipe header command (Line 1): R{boil_min},{steps},{mash_water},{sparge_water},
@@ -96,7 +96,7 @@ esp_err_t g30_encode_command(const unified_command_t *cmd, char out_buf[G30_COMM
  * @param out_buf Buffer of at least 20 bytes
  * @return ESP_OK on success
  */
-esp_err_t g30_encode_recipe_header(const unified_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]);
+esp_err_t g30_encode_recipe_header(const g30_recipe_t *recipe, char out_buf[G30_COMMAND_LEN + 1]);
 
 /**
  * @brief Encode recipe configuration flags (Line 2): 0,1,1,0,0,
@@ -137,7 +137,7 @@ esp_err_t g30_encode_recipe_boil_stop(uint16_t boil_time_remaining_min, char out
  * @param out_buf Buffer of at least 20 bytes
  * @return ESP_OK on success
  */
-esp_err_t g30_encode_recipe_mash_step(const unified_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]);
+esp_err_t g30_encode_recipe_mash_step(const g30_mash_step_t *step, char out_buf[G30_COMMAND_LEN + 1]);
 
 /**
  * @brief Get a user-friendly description for a G30 interaction code
