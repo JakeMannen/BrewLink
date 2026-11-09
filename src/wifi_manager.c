@@ -6,6 +6,8 @@
 #include "wifi_manager.h"
 #include <string.h>
 #include <stdlib.h>
+
+#ifdef ESP_PLATFORM
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -192,7 +194,89 @@ esp_err_t wifi_manager_init(wifi_manager_sta_cb_t sta_cb) {
 
     return ESP_OK;
 }
+#endif // ESP_PLATFORM
 
+static int wifi_ap_rssi_compare(const void *a, const void *b) {
+    const wifi_mgr_ap_record_t *rec_a = (const wifi_mgr_ap_record_t *)a;
+    const wifi_mgr_ap_record_t *rec_b = (const wifi_mgr_ap_record_t *)b;
+    // Sort descending by RSSI (strongest signal first, e.g. -45 dBm before -70 dBm)
+    return (int)rec_b->rssi - (int)rec_a->rssi;
+}
+
+uint16_t wifi_manager_deduplicate_ap_records(const wifi_mgr_ap_record_t *in_records,
+                                             uint16_t in_count,
+                                             wifi_mgr_ap_record_t *out_records,
+                                             uint16_t max_out) {
+    if (in_records == NULL || out_records == NULL || in_count == 0 || max_out == 0) {
+        return 0;
+    }
+
+    uint16_t unique_count = 0;
+
+    for (uint16_t i = 0; i < in_count; i++) {
+        // Skip hidden networks (empty SSID)
+        if (in_records[i].ssid[0] == '\0') {
+            continue;
+        }
+
+        // Check if this SSID is already recorded
+        int found_idx = -1;
+        for (uint16_t j = 0; j < unique_count; j++) {
+            if (strncmp(out_records[j].ssid, in_records[i].ssid, WIFI_MGR_SSID_MAX_LEN) == 0) {
+                found_idx = (int)j;
+                break;
+            }
+        }
+
+        if (found_idx >= 0) {
+            // Duplicate found: retain strongest RSSI and its auth mode
+            if (in_records[i].rssi > out_records[found_idx].rssi) {
+                out_records[found_idx].rssi = in_records[i].rssi;
+                out_records[found_idx].authmode = in_records[i].authmode;
+            }
+        } else {
+            // New unique SSID
+            if (unique_count < max_out) {
+                strncpy(out_records[unique_count].ssid, in_records[i].ssid, sizeof(out_records[unique_count].ssid) - 1);
+                out_records[unique_count].ssid[sizeof(out_records[unique_count].ssid) - 1] = '\0';
+                out_records[unique_count].rssi = in_records[i].rssi;
+                out_records[unique_count].authmode = in_records[i].authmode;
+                unique_count++;
+            } else {
+                // Buffer is full: if candidate has higher RSSI than the weakest current entry, replace it
+                uint16_t weakest_idx = 0;
+                int8_t min_rssi = out_records[0].rssi;
+                for (uint16_t j = 1; j < unique_count; j++) {
+                    if (out_records[j].rssi < min_rssi) {
+                        min_rssi = out_records[j].rssi;
+                        weakest_idx = j;
+                    }
+                }
+                if (in_records[i].rssi > min_rssi) {
+                    strncpy(out_records[weakest_idx].ssid, in_records[i].ssid, sizeof(out_records[weakest_idx].ssid) - 1);
+                    out_records[weakest_idx].ssid[sizeof(out_records[weakest_idx].ssid) - 1] = '\0';
+                    out_records[weakest_idx].rssi = in_records[i].rssi;
+                    out_records[weakest_idx].authmode = in_records[i].authmode;
+                }
+            }
+        }
+    }
+
+    // Sort final unique AP records descending by RSSI (strongest signals first)
+    if (unique_count > 1) {
+        qsort(out_records, unique_count, sizeof(wifi_mgr_ap_record_t), wifi_ap_rssi_compare);
+    }
+
+    return unique_count;
+}
+
+void wifi_manager_scan_free(wifi_mgr_ap_record_t *records) {
+    if (records != NULL) {
+        free(records);
+    }
+}
+
+#ifdef ESP_PLATFORM
 esp_err_t wifi_manager_scan(wifi_mgr_ap_record_t **out_records, uint16_t *out_count) {
     if (out_records == NULL || out_count == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -229,51 +313,72 @@ esp_err_t wifi_manager_scan(wifi_mgr_ap_record_t **out_records, uint16_t *out_co
         return ESP_OK;
     }
 
-    // Limit to 20 AP records to conserve heap
-    if (ap_count > 20) {
-        ap_count = 20;
-    }
+    // Limit raw records retrieval to WIFI_MGR_SCAN_MAX_RAW_RECORDS to conserve heap
+    uint16_t raw_count = (ap_count > WIFI_MGR_SCAN_MAX_RAW_RECORDS) ? WIFI_MGR_SCAN_MAX_RAW_RECORDS : ap_count;
 
-    wifi_ap_record_t *raw_records = malloc(sizeof(wifi_ap_record_t) * ap_count);
+    wifi_ap_record_t *raw_records = malloc(sizeof(wifi_ap_record_t) * raw_count);
     if (raw_records == NULL) {
         s_scanning = false;
         return ESP_ERR_NO_MEM;
     }
 
-    err = esp_wifi_scan_get_ap_records(&ap_count, raw_records);
+    err = esp_wifi_scan_get_ap_records(&raw_count, raw_records);
     if (err != ESP_OK) {
         free(raw_records);
         s_scanning = false;
         return err;
     }
 
-    wifi_mgr_ap_record_t *records = malloc(sizeof(wifi_mgr_ap_record_t) * ap_count);
-    if (records == NULL) {
+    wifi_mgr_ap_record_t *converted = malloc(sizeof(wifi_mgr_ap_record_t) * raw_count);
+    if (converted == NULL) {
         free(raw_records);
         s_scanning = false;
         return ESP_ERR_NO_MEM;
     }
 
-    for (uint16_t i = 0; i < ap_count; i++) {
-        strncpy(records[i].ssid, (char *)raw_records[i].ssid, sizeof(records[i].ssid) - 1);
-        records[i].ssid[sizeof(records[i].ssid) - 1] = '\0';
-        records[i].rssi = raw_records[i].rssi;
-        records[i].authmode = raw_records[i].authmode;
+    for (uint16_t i = 0; i < raw_count; i++) {
+        strncpy(converted[i].ssid, (char *)raw_records[i].ssid, sizeof(converted[i].ssid) - 1);
+        converted[i].ssid[sizeof(converted[i].ssid) - 1] = '\0';
+        converted[i].rssi = raw_records[i].rssi;
+        converted[i].authmode = (uint8_t)raw_records[i].authmode;
+    }
+    free(raw_records);
+
+    wifi_mgr_ap_record_t *records = calloc(WIFI_MGR_SCAN_MAX_UNIQUE_RECORDS, sizeof(wifi_mgr_ap_record_t));
+    if (records == NULL) {
+        free(converted);
+        s_scanning = false;
+        return ESP_ERR_NO_MEM;
     }
 
-    free(raw_records);
+    uint16_t unique_count = wifi_manager_deduplicate_ap_records(
+        converted, raw_count, records, WIFI_MGR_SCAN_MAX_UNIQUE_RECORDS
+    );
+    free(converted);
+
+    if (unique_count == 0) {
+        free(records);
+        *out_records = NULL;
+        *out_count = 0;
+        s_scanning = false;
+        ESP_LOGI(TAG, "Wi-Fi scan completed. 0 unique SSIDs found.");
+        return ESP_OK;
+    }
+
+    if (unique_count < WIFI_MGR_SCAN_MAX_UNIQUE_RECORDS) {
+        wifi_mgr_ap_record_t *shrunk = realloc(records, sizeof(wifi_mgr_ap_record_t) * unique_count);
+        if (shrunk != NULL) {
+            records = shrunk;
+        }
+    }
+
     *out_records = records;
-    *out_count = ap_count;
+    *out_count = unique_count;
     s_scanning = false;
 
-    ESP_LOGI(TAG, "Wi-Fi scan completed. Found %d networks.", ap_count);
+    ESP_LOGI(TAG, "Wi-Fi scan completed. Found %u unique networks (from %u scanned APs).",
+             (unsigned int)unique_count, (unsigned int)raw_count);
     return ESP_OK;
-}
-
-void wifi_manager_scan_free(wifi_mgr_ap_record_t *records) {
-    if (records != NULL) {
-        free(records);
-    }
 }
 
 esp_err_t wifi_manager_connect(const char *ssid, const char *password) {
@@ -330,3 +435,4 @@ esp_err_t wifi_manager_get_status(wifi_mgr_status_t *out_status) {
     xSemaphoreGive(s_wifi_mutex);
     return ESP_OK;
 }
+#endif // ESP_PLATFORM
