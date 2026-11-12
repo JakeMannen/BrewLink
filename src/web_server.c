@@ -253,6 +253,13 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     return httpd_resp_send(req, PAGE_INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
+// GET /favicon.svg and /favicon.ico - Browser Favicon
+static esp_err_t favicon_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "image/svg+xml");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    return httpd_resp_send(req, PAGE_FAVICON_SVG, HTTPD_RESP_USE_STRLEN);
+}
+
 // Captive Portal Redirect Handler
 static esp_err_t captive_portal_handler(httpd_req_t *req) {
     httpd_resp_set_status(req, "302 Found");
@@ -1522,7 +1529,7 @@ esp_err_t web_server_start(void) {
     config.server_port = WEB_SERVER_PORT;
     config.core_id = NETWORKING_TASK_CORE;
     config.stack_size = WEB_SERVER_STACK_SIZE;
-    config.max_uri_handlers = 32;
+    config.max_uri_handlers = 36;
     config.lru_purge_enable = true;
 
     ESP_LOGI(TAG, "Starting HTTP & WebSocket server on port %d...", config.server_port);
@@ -1538,6 +1545,12 @@ esp_err_t web_server_start(void) {
 
     httpd_uri_t uri_index = {.uri = "/index.html", .method = HTTP_GET, .handler = root_get_handler};
     httpd_register_uri_handler(s_server, &uri_index);
+
+    httpd_uri_t uri_favicon_svg = {.uri = "/favicon.svg", .method = HTTP_GET, .handler = favicon_get_handler};
+    httpd_register_uri_handler(s_server, &uri_favicon_svg);
+
+    httpd_uri_t uri_favicon_ico = {.uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get_handler};
+    httpd_register_uri_handler(s_server, &uri_favicon_ico);
 
     // Captive portal probes
     httpd_uri_t uri_cp1 = {.uri = "/generate_204", .method = HTTP_GET, .handler = captive_portal_handler};
