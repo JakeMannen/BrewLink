@@ -1,0 +1,412 @@
+name: BrewLink Firmware Release
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'refactor/**'
+      - 'rc/**'
+      - 'beta/**'
+      - 'alpha/**'
+      - 'prerelease/**'
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'partitions.csv'
+      - 'sdkconfig.defaults'
+      - 'sdkconfig.*'
+      - 'dependencies.lock'
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release channel (auto detects from GitHub Flow branch: main = stable, topic branch = prerelease)'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - main
+          - prerelease
+      bump_override:
+        description: 'Version bump override (auto calculates from Conventional Commits)'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - major
+          - minor
+          - patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  version:
+    name: Calculate Semantic Version (Conventional Commits)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semver.outputs.version }}
+      tag: ${{ steps.semver.outputs.tag }}
+      base_version: ${{ steps.semver.outputs.base_version }}
+      previous_tag: ${{ steps.semver.outputs.previous_tag }}
+      bump_type: ${{ steps.semver.outputs.bump_type }}
+      is_prerelease: ${{ steps.semver.outputs.is_prerelease }}
+      should_release: ${{ steps.semver.outputs.should_release }}
+
+    steps:
+      - name: Checkout repository with full history and tags
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version from GitHub Flow & Conventional Commits
+        id: semver
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type || 'auto' }}
+          INPUT_BUMP_OVERRIDE: ${{ inputs.bump_override || 'auto' }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+
+          # Find the latest stable SemVer tag (vMAJOR.MINOR.PATCH without prerelease suffix)
+          LATEST_STABLE_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+
+          if [ -z "$LATEST_STABLE_TAG" ]; then
+            MAJOR=0
+            MINOR=0
+            PATCH=0
+            COMMIT_RANGE="HEAD"
+            echo "No prior stable release tag found. Starting from v0.0.0."
+          else
+            VERSION_STR="${LATEST_STABLE_TAG#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_STR"
+            COMMIT_RANGE="${LATEST_STABLE_TAG}..HEAD"
+            echo "Latest stable release tag: ${LATEST_STABLE_TAG}"
+          fi
+
+          # Check if HEAD is already tagged with a stable release on non-manual triggers
+          HEAD_STABLE_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+          if [ -n "$HEAD_STABLE_TAG" ] && [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "HEAD is already tagged as ${HEAD_STABLE_TAG}; skipping duplicate release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Determine version bump from Conventional Commits in COMMIT_RANGE
+          BUMP="patch"
+          if [ "$INPUT_BUMP_OVERRIDE" != "auto" ]; then
+            BUMP="$INPUT_BUMP_OVERRIDE"
+            echo "Using manual bump override: ${BUMP}"
+          else
+            COMMIT_Subjects=$(git log "$COMMIT_RANGE" --no-merges --pretty=format:"%s" || true)
+            COMMIT_BODIES=$(git log "$COMMIT_RANGE" --no-merges --pretty=format:"%b" || true)
+            MERGE_SUBJECTS=$(git log "$COMMIT_RANGE" --merges --pretty=format:"%s" || true)
+
+            if echo "$COMMIT_Subjects" | grep -Eq '^[a-zA-Z]+(\([^)]+\))?!:' || \
+               echo "$COMMIT_BODIES" | grep -Eq 'BREAKING[ -]CHANGE:'; then
+              BUMP="major"
+            elif echo "$COMMIT_Subjects" | grep -Eq '^feat(\([^)]+\))?:' || \
+                 echo "$MERGE_SUBJECTS" | grep -Eq 'from [^/]+/feat/'; then
+              BUMP="minor"
+            else
+              BUMP="patch"
+            fi
+          fi
+
+          case "$BUMP" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          BASE_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+          # Determine if this build is a Main (Production) Release or a Prerelease
+          if [ "$INPUT_RELEASE_TYPE" = "main" ]; then
+            IS_PRERELEASE="false"
+          elif [ "$INPUT_RELEASE_TYPE" = "prerelease" ]; then
+            IS_PRERELEASE="true"
+          elif [ "$REF_NAME" = "main" ]; then
+            IS_PRERELEASE="false"
+          else
+            IS_PRERELEASE="true"
+          fi
+
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            # Sanitize GitHub Flow branch name into a SemVer prerelease identifier
+            BRANCH_SLUG=$(echo "$REF_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+            if [ -z "$BRANCH_SLUG" ] || [ "$BRANCH_SLUG" = "main" ]; then
+              BRANCH_SLUG="pre"
+            fi
+            SHORT_COMMIT="${SHORT_SHA:0:7}"
+            FINAL_VERSION="${BASE_VERSION}-${BRANCH_SLUG}.${RUN_NUMBER}.${SHORT_COMMIT}"
+          else
+            # Ensure stable tag does not collide with an existing tag
+            while git rev-parse "v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1; do
+              PATCH=$((PATCH + 1))
+            done
+            BASE_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            FINAL_VERSION="${BASE_VERSION}"
+          fi
+
+          FINAL_TAG="v${FINAL_VERSION}"
+
+          echo "Calculated Release Version: ${FINAL_TAG} (bump=${BUMP}, prerelease=${IS_PRERELEASE})"
+
+          {
+            echo "should_release=true"
+            echo "version=${FINAL_VERSION}"
+            echo "tag=${FINAL_TAG}"
+            echo "base_version=${BASE_VERSION}"
+            echo "previous_tag=${LATEST_STABLE_TAG}"
+            echo "bump_type=${BUMP}"
+            echo "is_prerelease=${IS_PRERELEASE}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-firmware:
+    name: Build & Package ESP32 Firmware
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Cache PlatformIO Core & Platforms
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini', '**/sdkconfig.defaults', '**/partitions.csv') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO Core & Esptool
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio esptool
+
+      - name: Verify Secrets Configuration
+        run: |
+          if [ ! -f include/secrets.h ]; then
+            echo "secrets.h not found; creating dummy secrets.h from secrets.example.h for CI build..."
+            cp include/secrets.example.h include/secrets.h
+          fi
+
+      - name: Run Native Host Unit Tests
+        run: |
+          pio test -e native
+
+      - name: Build ESP32 Firmware (esp32dev)
+        run: |
+          pio run -e esp32dev
+
+      - name: Package Versioned Firmware Files
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          OUT_DIR="release-firmware"
+          mkdir -p "$OUT_DIR"
+
+          BUILD_DIR=".pio/build/esp32dev"
+          PREFIX="brewlink-esp32dev-v${VERSION}"
+
+          # Copy individual ESP-IDF firmware binaries and ELF symbols
+          cp "${BUILD_DIR}/firmware.bin"   "${OUT_DIR}/${PREFIX}-firmware.bin"
+          cp "${BUILD_DIR}/bootloader.bin" "${OUT_DIR}/${PREFIX}-bootloader.bin"
+          cp "${BUILD_DIR}/partitions.bin" "${OUT_DIR}/${PREFIX}-partitions.bin"
+          cp "${BUILD_DIR}/firmware.elf"   "${OUT_DIR}/${PREFIX}-firmware.elf"
+
+          # Create merged full-flash factory image (flashable at 0x0)
+          python -m esptool --chip esp32 merge-bin \
+            -o "${OUT_DIR}/${PREFIX}-factory.bin" \
+            --flash-mode dio \
+            --flash-freq 40m \
+            --flash-size 4MB \
+            0x1000 "${BUILD_DIR}/bootloader.bin" \
+            0x8000 "${BUILD_DIR}/partitions.bin" \
+            0x10000 "${BUILD_DIR}/firmware.bin" || \
+          python -m esptool --chip esp32 merge_bin \
+            -o "${OUT_DIR}/${PREFIX}-factory.bin" \
+            --flash_mode dio \
+            --flash_freq 40m \
+            --flash_size 4MB \
+            0x1000 "${BUILD_DIR}/bootloader.bin" \
+            0x8000 "${BUILD_DIR}/partitions.bin" \
+            0x10000 "${BUILD_DIR}/firmware.bin"
+
+          # Generate SHA-256 checksums for all firmware release files
+          (
+            cd "$OUT_DIR"
+            sha256sum "${PREFIX}-factory.bin" \
+                      "${PREFIX}-firmware.bin" \
+                      "${PREFIX}-bootloader.bin" \
+                      "${PREFIX}-partitions.bin" \
+                      "${PREFIX}-firmware.elf" > SHA256SUMS.txt
+          )
+
+          ls -lh "$OUT_DIR"
+          cat "${OUT_DIR}/SHA256SUMS.txt"
+
+      - name: Upload Packaged Firmware Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: brewlink-firmware-${{ needs.version.outputs.tag }}
+          path: release-firmware/*
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [version, build-firmware]
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download Packaged Firmware Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: brewlink-firmware-${{ needs.version.outputs.tag }}
+          path: release-firmware
+
+      - name: Generate Release Notes & Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PREV_TAG: ${{ needs.version.outputs.previous_tag }}
+          BUMP_TYPE: ${{ needs.version.outputs.bump_type }}
+          IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          PREFIX="brewlink-esp32dev-v${VERSION}"
+          NOTES_FILE="RELEASE_NOTES.md"
+
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          BREAKING_LOG=$(git log "$RANGE" --no-merges --grep="BREAKING CHANGE" --grep="!:" -E --pretty=format:"- %s (%h)" || true)
+          FEAT_LOG=$(git log "$RANGE" --no-merges --grep="^feat(\([^)]+\))?:" -E --pretty=format:"- %s (%h)" || true)
+          FIX_LOG=$(git log "$RANGE" --no-merges --grep="^fix(\([^)]+\))?:" -E --pretty=format:"- %s (%h)" || true)
+          OTHER_LOG=$(git log "$RANGE" --no-merges --grep="^(perf|refactor|chore|docs|build|ci|test)(\([^)]+\))?:" -E --pretty=format:"- %s (%h)" || true)
+
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            RELEASE_TITLE="BrewLink ${TAG} (Pre-release)"
+            CHANNEL_DESC="**Pre-release build** generated from branch \`${REF_NAME}\`."
+          else
+            RELEASE_TITLE="BrewLink ${TAG}"
+            CHANNEL_DESC="**Stable release** built from \`main\` (${BUMP_TYPE} version increment)."
+          fi
+
+          {
+            echo "## ${RELEASE_TITLE}"
+            echo ""
+            echo "${CHANNEL_DESC}"
+            echo ""
+            if [ -n "$BREAKING_LOG" ]; then
+              echo "### Breaking Changes"
+              echo "$BREAKING_LOG"
+              echo ""
+            fi
+            if [ -n "$FEAT_LOG" ]; then
+              echo "### Features"
+              echo "$FEAT_LOG"
+              echo ""
+            fi
+            if [ -n "$FIX_LOG" ]; then
+              echo "### Bug Fixes"
+              echo "$FIX_LOG"
+              echo ""
+            fi
+            if [ -n "$OTHER_LOG" ]; then
+              echo "### Maintenance & Refactoring"
+              echo "$OTHER_LOG"
+              echo ""
+            fi
+            echo "### Firmware Files (ESP32 / \`esp32dev\`)"
+            echo ""
+            echo "| File | Flash Offset | Description |"
+            echo "| :--- | :--- | :--- |"
+            echo "| \`${PREFIX}-factory.bin\` | \`0x0000\` | Complete merged factory image (Bootloader + Partitions + App) |"
+            echo "| \`${PREFIX}-firmware.bin\` | \`0x10000\` | Application firmware binary (for OTA or partition flash) |"
+            echo "| \`${PREFIX}-bootloader.bin\` | \`0x1000\` | ESP32 second-stage bootloader |"
+            echo "| \`${PREFIX}-partitions.bin\` | \`0x8000\` | ESP-IDF partition table |"
+            echo "| \`${PREFIX}-firmware.elf\` | — | ELF debug symbols for exception decoding |"
+            echo "| \`SHA256SUMS.txt\` | — | SHA-256 checksums for all release assets |"
+            echo ""
+            echo "#### Flash Instructions (\`esptool.py\`)"
+            echo "\`\`\`bash"
+            echo "# Full factory flash (single merged file at 0x0):"
+            echo "esptool.py --chip esp32 --baud 460800 write_flash 0x0 ${PREFIX}-factory.bin"
+            echo ""
+            echo "# Or flash individual partitions:"
+            echo "esptool.py --chip esp32 --baud 460800 write_flash \\"
+            echo "  0x1000 ${PREFIX}-bootloader.bin \\"
+            echo "  0x8000 ${PREFIX}-partitions.bin \\"
+            echo "  0x10000 ${PREFIX}-firmware.bin"
+            echo "\`\`\`"
+            echo ""
+            echo "#### SHA-256 Checksums"
+            echo "\`\`\`text"
+            cat release-firmware/SHA256SUMS.txt
+            echo "\`\`\`"
+          } > "$NOTES_FILE"
+
+          RELEASE_ARGS=(
+            "$TAG"
+            release-firmware/*
+            --target "${GITHUB_SHA}"
+            --title "$RELEASE_TITLE"
+            --notes-file "$NOTES_FILE"
+          )
+
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            RELEASE_ARGS+=(--prerelease)
+          else
+            RELEASE_ARGS+=(--latest)
+          fi
+
+          gh release create "${RELEASE_ARGS[@]}"

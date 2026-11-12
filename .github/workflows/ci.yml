@@ -2,31 +2,65 @@ name: BrewLink PlatformIO CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'refactor/**'
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'partitions.csv'
+      - 'sdkconfig.defaults'
+      - 'sdkconfig.*'
+      - 'dependencies.lock'
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'platformio.ini'
+      - 'CMakeLists.txt'
+      - 'partitions.csv'
+      - 'sdkconfig.defaults'
+      - 'sdkconfig.*'
+      - 'dependencies.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  build:
-    name: Build & Verify Firmware
+  test-and-build:
+    name: Test & Build Firmware
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: '3.13'
+          cache: 'pip'
 
       - name: Cache PlatformIO Core & Platforms
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.platformio
             .pio
-          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini', '**/sdkconfig.defaults') }}
+          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini', '**/sdkconfig.defaults', '**/partitions.csv') }}
           restore-keys: |
             ${{ runner.os }}-pio-
 
@@ -42,6 +76,22 @@ jobs:
             cp include/secrets.example.h include/secrets.h
           fi
 
+      - name: Run Native Host Unit Tests
+        run: |
+          pio test -e native
+
       - name: Build Firmware (Generic ESP32 ESP-IDF)
         run: |
           pio run -e esp32dev
+
+      - name: Upload Firmware Build Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: brewlink-esp32dev-ci-${{ github.sha }}
+          path: |
+            .pio/build/esp32dev/firmware.bin
+            .pio/build/esp32dev/bootloader.bin
+            .pio/build/esp32dev/partitions.bin
+            .pio/build/esp32dev/firmware.elf
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Emitting Wireless Signal Arcs -->
+  <path d="M41 14 A7 7 0 0 1 48 21" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M41 8 A13 13 0 0 1 54 21" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round" opacity="0.85"/>
+  <path d="M41 2 A19 19 0 0 1 60 21" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round" opacity="0.65"/>
+  <circle cx="41" cy="21" r="2.5" fill="#38bdf8"/>
+
+  <!-- Mug Handle -->
+  <path d="M36 33 H42 A5 5 0 0 1 47 38 V45 A5 5 0 0 1 42 50 H36" stroke="#f59e0b" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Beer Mug Body -->
+  <rect x="8" y="26" width="28" height="31" rx="5" fill="#f59e0b" stroke="#fbbf24" stroke-width="2"/>
+
+  <!-- Mug Glass Flutes / Highlights -->
+  <line x1="16" y1="34" x2="16" y2="49" stroke="#fef3c7" stroke-width="2.5" stroke-linecap="round" opacity="0.65"/>
+  <line x1="22" y1="34" x2="22" y2="49" stroke="#fef3c7" stroke-width="2.5" stroke-linecap="round" opacity="0.65"/>
+  <line x1="28" y1="34" x2="28" y2="49" stroke="#fef3c7" stroke-width="2.5" stroke-linecap="round" opacity="0.65"/>
+
+  <!-- Frothy Beer Foam Head -->
+  <path d="M9 28 C6.8 28 5 26.2 5 24 C5 21.9 6.6 20.2 8.7 20 C9.6 16.8 12.5 14.5 16 14.5 C18.5 14.5 20.7 15.7 22.1 17.5 C23.3 16.9 24.6 16.5 26 16.5 C29.5 16.5 32.4 19 33.1 22.3 C35.3 22.6 37 24.5 37 26.8 C37 27.5 36.4 28 35.7 28 H9 Z" fill="#f8fafc"/>
+</svg>
