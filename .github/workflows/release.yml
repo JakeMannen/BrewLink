@@ -200,7 +200,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-          cache: 'pip'
 
       - name: Cache PlatformIO Core & Platforms
         uses: actions/cache@v6
