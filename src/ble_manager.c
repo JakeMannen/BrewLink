@@ -527,8 +527,19 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
             if (eq_type == EQUIPMENT_TYPE_UNKNOWN) {
                 eq_type = EQUIPMENT_TYPE_BOILER;
             }
-            const char *model_str = compat ? compat->model_name :
-                                    (paired_dev.model[0] ? paired_dev.model : "Grainfather G30 Connect");
+            const char *model_str = NULL;
+            if (compat != NULL) {
+                model_str = compat->model_name;
+            } else if (paired_dev.model[0] != '\0') {
+                const ble_compatible_device_t *paired_compat = NULL;
+                if (ble_compatibility_match_by_name(paired_dev.model, &paired_compat) && paired_compat != NULL) {
+                    model_str = paired_compat->model_name;
+                } else {
+                    model_str = paired_dev.model;
+                }
+            } else {
+                model_str = "Grainfather G30";
+            }
             bool is_g30 = (eq_type == EQUIPMENT_TYPE_BOILER && (strstr(model_str, "Grainfather") != NULL));
 
             // Record in scan table (including latest RSSI)
@@ -616,10 +627,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                             s_peers[slot].addr_type = desc.peer_id_addr.type;
                         }
 
-                        // Check if device name and RSSI were known from scan
+                        // Check if device name, model, and RSSI were known from scan
                         for (int i = 0; i < s_scan_count; i++) {
                             if (memcmp(s_scan_entries[i].addr, s_peers[slot].addr, 6) == 0) {
                                 strncpy(s_peers[slot].device_name, s_scan_entries[i].name, sizeof(s_peers[slot].device_name) - 1);
+                                strncpy(s_peers[slot].model, s_scan_entries[i].model, sizeof(s_peers[slot].model) - 1);
                                 s_peers[slot].equipment_type = s_scan_entries[i].equipment_type;
                                 if (!have_live_rssi && s_scan_entries[i].rssi != 0) {
                                     s_peers[slot].rssi = s_scan_entries[i].rssi;
@@ -627,23 +639,47 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                                 break;
                             }
                         }
-                        if (s_peers[slot].device_name[0] == '\0') {
+                        if (s_peers[slot].device_name[0] == '\0' || s_peers[slot].model[0] == '\0') {
                             paired_ble_device_t paired_list[CONFIG_STORE_MAX_PAIRED_BLE];
                             if (config_store_get_paired_ble(paired_list) == ESP_OK) {
                                 for (uint8_t p = 0; p < CONFIG_STORE_MAX_PAIRED_BLE; p++) {
                                     if (paired_list[p].active && memcmp(paired_list[p].addr, s_peers[slot].addr, 6) == 0) {
-                                        strncpy(s_peers[slot].device_name,
-                                                paired_list[p].model[0] ? paired_list[p].model : paired_list[p].name,
-                                                sizeof(s_peers[slot].device_name) - 1);
+                                        if (s_peers[slot].device_name[0] == '\0') {
+                                            strncpy(s_peers[slot].device_name,
+                                                    paired_list[p].name[0] ? paired_list[p].name : paired_list[p].model,
+                                                    sizeof(s_peers[slot].device_name) - 1);
+                                        }
+                                        if (s_peers[slot].model[0] == '\0' && paired_list[p].model[0] != '\0') {
+                                            strncpy(s_peers[slot].model, paired_list[p].model, sizeof(s_peers[slot].model) - 1);
+                                        }
                                         s_peers[slot].equipment_type = (equipment_type_t)paired_list[p].equipment_type;
                                         break;
                                     }
                                 }
                             }
                         }
+                        // Resolve canonical model name from compatibility registry (e.g. "Grain" -> "Grainfather G30")
+                        const ble_compatible_device_t *resolved_compat = NULL;
+                        if (s_peers[slot].model[0] != '\0' &&
+                            ble_compatibility_match_by_name(s_peers[slot].model, &resolved_compat) &&
+                            resolved_compat != NULL) {
+                            strncpy(s_peers[slot].model, resolved_compat->model_name, sizeof(s_peers[slot].model) - 1);
+                            s_peers[slot].equipment_type = resolved_compat->equipment_type;
+                        } else if (s_peers[slot].model[0] == '\0' &&
+                                   s_peers[slot].device_name[0] != '\0' &&
+                                   ble_compatibility_match_by_name(s_peers[slot].device_name, &resolved_compat) &&
+                                   resolved_compat != NULL) {
+                            strncpy(s_peers[slot].model, resolved_compat->model_name, sizeof(s_peers[slot].model) - 1);
+                            s_peers[slot].equipment_type = resolved_compat->equipment_type;
+                        }
+                        if (s_peers[slot].model[0] == '\0') {
+                            strncpy(s_peers[slot].model, "Grainfather G30", sizeof(s_peers[slot].model) - 1);
+                            if (s_peers[slot].equipment_type == EQUIPMENT_TYPE_UNKNOWN) {
+                                s_peers[slot].equipment_type = EQUIPMENT_TYPE_BOILER;
+                            }
+                        }
                         if (s_peers[slot].device_name[0] == '\0') {
-                            strncpy(s_peers[slot].device_name, "Grainfather G30 Connect", sizeof(s_peers[slot].device_name) - 1);
-                            s_peers[slot].equipment_type = EQUIPMENT_TYPE_BOILER;
+                            strncpy(s_peers[slot].device_name, s_peers[slot].model, sizeof(s_peers[slot].device_name) - 1);
                         }
 
                         connected_peer = s_peers[slot];

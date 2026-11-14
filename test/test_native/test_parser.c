@@ -76,11 +76,11 @@ void test_ble_peer_and_scan_structures(void) {
     scan.is_compatible = true;
     scan.equipment_type = EQUIPMENT_TYPE_BOILER;
     strncpy(scan.name, "Grainfather", sizeof(scan.name) - 1);
-    strncpy(scan.model, "Grainfather G30 Connect", sizeof(scan.model) - 1);
+    strncpy(scan.model, "Grainfather G30", sizeof(scan.model) - 1);
     TEST_ASSERT_TRUE(scan.is_grainfather);
     TEST_ASSERT_TRUE(scan.is_compatible);
     TEST_ASSERT_EQUAL_STRING("Grainfather", scan.name);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", scan.model);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", scan.model);
 }
 
 void test_wifi_ap_configuration_defines(void) {
@@ -533,8 +533,8 @@ void test_compatible_devices_registry_defined(void) {
     // G30 is the sole compatible equipment in focus
     TEST_ASSERT_EQUAL_UINT(1, count);
 
-    // Verify sole device is Grainfather G30 Connect
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", list[0].model_name);
+    // Verify sole device is Grainfather G30
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", list[0].model_name);
     TEST_ASSERT_EQUAL_INT(EQUIPMENT_TYPE_BOILER, list[0].equipment_type);
     TEST_ASSERT_EQUAL_STRING("Grain", list[0].name_prefix);
     TEST_ASSERT_EQUAL_HEX16(0xCDD0, list[0].svc_uuid16);
@@ -547,22 +547,22 @@ void test_compatibility_match_grainfather_names(void) {
 
     TEST_ASSERT_TRUE(ble_compatibility_match_by_name("Grain", &match));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 
     match = NULL;
     TEST_ASSERT_TRUE(ble_compatibility_match_by_name("Grainfather", &match));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 
     match = NULL;
     TEST_ASSERT_TRUE(ble_compatibility_match_by_name("grain_cdd0", &match));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 
     match = NULL;
     TEST_ASSERT_TRUE(ble_compatibility_match_by_name("GRAINFATHER_G30", &match));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 }
 
 void test_compatibility_match_by_service_uuids(void) {
@@ -571,7 +571,7 @@ void test_compatibility_match_by_service_uuids(void) {
     // 16-bit 0xCDD0
     TEST_ASSERT_TRUE(ble_compatibility_match_by_uuid16(0xCDD0, &match));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 
     // 128-bit little endian 0000cdd0-0000-1000-8000-00805f9b34fb
     const uint8_t g30_u128[16] = {
@@ -581,7 +581,7 @@ void test_compatibility_match_by_service_uuids(void) {
     match = NULL;
     TEST_ASSERT_TRUE(ble_compatibility_match_by_uuid128(g30_u128, &match));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 }
 
 void test_compatibility_rejects_non_g30_equipment(void) {
@@ -631,7 +631,7 @@ void test_compatibility_full_advertisement_check(void) {
         &match
     ));
     TEST_ASSERT_NOT_NULL(match);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", match->model_name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", match->model_name);
 
     // Device with neither compatible name nor compatible UUID is rejected
     uint16_t non_brewing_u16[] = {0x180D, 0x180A};
@@ -1249,7 +1249,7 @@ void test_equipment_manager_multi_device_recipe_dispatch(void) {
     // Connect 1 Boiler (Grainfather G30) and 1 Fermenter simultaneously
     uint8_t g30_mac[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x22};
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
-        g30_mac, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 1, -58));
+        g30_mac, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 1, -58));
 
     uint8_t ferm_mac[6] = {0xAA, 0xBB, 0xCC, 0x11, 0x22, 0x33};
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
@@ -1298,7 +1298,7 @@ void test_equipment_manager_multi_device_recipe_dispatch(void) {
     TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"req_id\":\"req-list-1\""));
     TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"count\":2"));
     TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":1"));
-    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"name\":\"Grainfather G30 Connect\""));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"name\":\"Grainfather G30\""));
     TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":2"));
     TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"name\":\"Generic BLE Fermenter\""));
 
@@ -1311,7 +1311,7 @@ void test_equipment_manager_multi_device_recipe_dispatch(void) {
 
     // 5. Disconnect G30 and verify subsequent upload fails fast with ESP_ERR_NOT_FOUND
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
-        g30_mac, false, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 1, -58));
+        g30_mac, false, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 1, -58));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, equipment_manager_dispatch_recipe(g30_mac, EQUIPMENT_TYPE_BOILER, "req-g30-2", &recipe, resolved_mac));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, equipment_manager_dispatch_recipe_to_slot(1, NULL, EQUIPMENT_TYPE_BOILER, "req-slot-1-offline", &recipe, resolved_mac));
 }
@@ -1320,24 +1320,30 @@ void test_equipment_manager_unique_names_and_power_cycle_persistence(void) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_init(NULL));
     equipment_manager_set_enqueue_override(mock_enqueue_ble_pkt);
 
-    // Pair two identical "Grainfather G30 Connect" boilers with different MAC addresses
+    // Pair three identical "Grainfather G30" boilers with different MAC addresses
     uint8_t g30_mac_1[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x22};
     uint8_t g30_mac_2[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x23};
+    uint8_t g30_mac_3[6] = {0xC4, 0x4F, 0x33, 0x1A, 0x8B, 0x24};
 
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
-        g30_mac_1, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 1, -55));
+        g30_mac_1, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 1, -55));
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
-        g30_mac_2, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 2, -62));
+        g30_mac_2, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 2, -62));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
+        g30_mac_3, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 3, -65));
 
-    equipment_slot_t slot1, slot2;
+    equipment_slot_t slot1, slot2, slot3;
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(0, &slot1));
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(1, &slot2));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(2, &slot3));
 
-    // Verify names are guaranteed unique across all paired slots
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect", slot1.name);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect-8B23", slot2.name);
+    // Verify names are guaranteed unique across all paired slots with incrementing numbers
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30", slot1.name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30 2", slot2.name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30 3", slot3.name);
     TEST_ASSERT_TRUE(slot1.paired);
     TEST_ASSERT_TRUE(slot2.paired);
+    TEST_ASSERT_TRUE(slot3.paired);
 
     // Verify targeting the second boiler specifically by its unique target_name
     s_captured_pkt_count = 0;
@@ -1345,7 +1351,7 @@ void test_equipment_manager_unique_names_and_power_cycle_persistence(void) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.action = G30_CMD_ACTION_SET_PUMP;
     cmd.params.pump_state = true;
-    strncpy(cmd.target_name, "Grainfather G30 Connect-8B23", sizeof(cmd.target_name) - 1);
+    strncpy(cmd.target_name, "Grainfather G30 2", sizeof(cmd.target_name) - 1);
 
     uint8_t resolved_mac[6] = {0};
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_dispatch_command(&cmd, resolved_mac));
@@ -1354,20 +1360,20 @@ void test_equipment_manager_unique_names_and_power_cycle_persistence(void) {
 
     // Simulate power-cycling Boiler 2 (disconnect -> stays in paired list with connected: false, then reconnects to same slot & unique name)
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
-        g30_mac_2, false, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 2, -62));
+        g30_mac_2, false, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 2, -62));
 
     char eq_list_json[1024] = {0};
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_format_equipment_list_json("C44F331A8B20", NULL, eq_list_json, sizeof(eq_list_json)));
-    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"count\":2"));
-    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":2,\"paired\":true,\"connected\":false,\"name\":\"Grainfather G30 Connect-8B23\""));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"count\":3"));
+    TEST_ASSERT_NOT_NULL(strstr(eq_list_json, "\"slot\":2,\"paired\":true,\"connected\":false,\"name\":\"Grainfather G30 2\""));
 
     // Power Boiler 2 back on -> reconnects into slot 2 and retains its unique name
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_on_peer_event(
-        g30_mac_2, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30 Connect", 5, -59));
+        g30_mac_2, true, EQUIPMENT_TYPE_BOILER, "Grainfather G30", 5, -59));
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_get_slot(1, &slot2));
     TEST_ASSERT_TRUE(slot2.connected);
     TEST_ASSERT_TRUE(slot2.paired);
-    TEST_ASSERT_EQUAL_STRING("Grainfather G30 Connect-8B23", slot2.name);
+    TEST_ASSERT_EQUAL_STRING("Grainfather G30 2", slot2.name);
 
     // Explicit unpair removes it from the slot
     TEST_ASSERT_EQUAL_INT(ESP_OK, equipment_manager_unpair_device(g30_mac_2));

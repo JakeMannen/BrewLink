@@ -113,7 +113,7 @@ static void publish_equipment_manifest(const ble_peer_device_t *peer, bool conne
                  "\"power_pct_min\":0,\"power_pct_max\":100},"
                  "\"timestamp_ms\":%lu}",
                  s_gateway_id, mac_str, eq_type_str,
-                 peer->device_name[0] ? peer->device_name : "Grainfather G30 Connect",
+                 peer->model[0] ? peer->model : (peer->device_name[0] ? peer->device_name : "Grainfather G30"),
                  peer->conn_handle, peer->rssi,
                  (peer->equipment_type == EQUIPMENT_TYPE_BOILER) ? "true" : "false",
                  (peer->equipment_type != EQUIPMENT_TYPE_FERMENTER) ? "true" : "false",
@@ -159,7 +159,7 @@ static void on_ble_peer_lifecycle_event(const ble_peer_device_t *peer, bool conn
              peer->addr[3], peer->addr[4], peer->addr[5],
              peer->device_name, connected ? "CONNECTED" : "DISCONNECTED");
 
-    const char *model_str = peer->device_name[0] ? peer->device_name : "Grainfather G30 Connect";
+    const char *model_str = peer->model[0] ? peer->model : "Grainfather G30";
     equipment_manager_on_peer_event(peer->addr,
                                     connected,
                                     peer->equipment_type,
@@ -277,7 +277,7 @@ esp_err_t g30_controller_get_state(g30_state_t *out_state,
                 if (out_rssi != NULL) {
                     *out_rssi = peers[i].rssi;
                 }
-                const char *m_str = peers[i].device_name[0] ? peers[i].device_name : "Grainfather G30 Connect";
+                const char *m_str = peers[i].model[0] ? peers[i].model : "Grainfather G30";
                 equipment_manager_on_peer_event(peers[i].addr,
                                                 true,
                                                 EQUIPMENT_TYPE_BOILER,
@@ -678,7 +678,7 @@ static void on_mqtt_connection_status_change(bool connected) {
                          "},\"timestamp_ms\":%lu}",
                          mac_str,
                          equip_type_to_str(peers[i].equipment_type),
-                         peers[i].device_name[0] ? peers[i].device_name : "Grainfather G30 Connect",
+                         peers[i].model[0] ? peers[i].model : "Grainfather G30",
                          peers[i].rssi,
                          b_state.current_temp_c, b_state.target_temp_c, b_state.boil_temp_c,
                          b_state.heat_active ? "true" : "false",
@@ -907,15 +907,25 @@ void app_main(void) {
     if (config_store_get_paired_ble(paired_ble) == ESP_OK) {
         for (uint8_t i = 0; i < CONFIG_STORE_MAX_PAIRED_BLE; i++) {
             if (paired_ble[i].active) {
+                const char *restored_model = paired_ble[i].model;
+                const char *restored_name = paired_ble[i].name;
+                const ble_compatible_device_t *compat = NULL;
+                if (ble_compatibility_match_by_name(restored_model[0] ? restored_model : restored_name, &compat) &&
+                    compat != NULL) {
+                    restored_model = compat->model_name;
+                    if (strcasecmp(restored_name, "Grain") == 0) {
+                        restored_name = NULL;
+                    }
+                }
                 uint8_t slot_idx = 0;
                 equipment_manager_register_paired_device(paired_ble[i].addr,
                                                          (equipment_type_t)paired_ble[i].equipment_type,
-                                                         paired_ble[i].name,
-                                                         paired_ble[i].model,
+                                                         restored_name,
+                                                         restored_model,
                                                          &slot_idx);
                 ESP_LOGI(TAG, "Restored paired BLE device [slot %u]: '%s' (%02X:%02X:%02X:%02X:%02X:%02X)",
                          (unsigned int)(slot_idx + 1),
-                         paired_ble[i].name,
+                         restored_name ? restored_name : restored_model,
                          paired_ble[i].addr[0], paired_ble[i].addr[1], paired_ble[i].addr[2],
                          paired_ble[i].addr[3], paired_ble[i].addr[4], paired_ble[i].addr[5]);
             }
