@@ -32,7 +32,7 @@ jobs:
             chore
             revert
           requireScope: false
-          validateSingleCommit: true
+          validateSingleCommit: false
 
   validate-pr-commits:
     name: Validate PR Commits
