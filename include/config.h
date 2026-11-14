@@ -45,6 +45,7 @@ typedef struct {
     uint16_t         write_val_handle;
     equipment_type_t equipment_type;
     char             device_name[32];
+    char             model[32];
 } ble_peer_device_t;
 
 // Structure for advertising BLE peripherals discovered during scanning

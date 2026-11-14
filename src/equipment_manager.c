@@ -95,7 +95,21 @@ static void assign_unique_slot_name(int slot_idx,
         return;
     }
 
-    // Disambiguate using last 2 bytes of MAC address (e.g. "Grainfather G30 Connect-8B22")
+    // Disambiguate multiple devices of the same model with an incrementing number:
+    // e.g. "Grainfather G30", "Grainfather G30 2", "Grainfather G30 3", ...
+    for (unsigned int n = 2; n <= BLE_MAX_SIMULTANEOUS_CONNECTIONS + 8; n++) {
+        char suffix[16];
+        int suffix_len = snprintf(suffix, sizeof(suffix), " %u", n);
+        int max_base_len = (suffix_len > 0 && suffix_len < 31) ? (31 - suffix_len) : 25;
+        snprintf(candidate, sizeof(candidate), "%.*s%s", max_base_len, base, suffix);
+        if (!is_slot_name_taken(slot_idx, candidate)) {
+            strncpy(out_name, candidate, 31);
+            out_name[31] = '\0';
+            return;
+        }
+    }
+
+    // Fallback disambiguation using last 2 bytes of MAC address
     if (mac != NULL) {
         snprintf(candidate, sizeof(candidate), "%.25s-%02X%02X", base, mac[4], mac[5]);
         if (!is_slot_name_taken(slot_idx, candidate)) {
@@ -105,7 +119,7 @@ static void assign_unique_slot_name(int slot_idx,
         }
     }
 
-    // Fallback disambiguation using 1-based slot number
+    // Final fallback disambiguation using 1-based slot number
     unsigned int slot_num = (unsigned int)(((slot_idx >= 0 && slot_idx < 8) ? slot_idx : 0) + 1);
     snprintf(candidate, sizeof(candidate), "%.26s #%u", base, slot_num);
     strncpy(out_name, candidate, 31);
@@ -573,7 +587,7 @@ static esp_err_t cooler_drv_format_telemetry_json(const equipment_slot_t *slot,
 // =============================================================================
 static const equipment_driver_t s_drivers[] = {
     {
-        .driver_name           = "Grainfather G30 Connect",
+        .driver_name           = "Grainfather G30",
         .equipment_type        = EQUIPMENT_TYPE_BOILER,
         .capabilities_mask     = EQ_CAP_TEMP_READ | EQ_CAP_TEMP_SET | EQ_CAP_PUMP_CONTROL |
                                  EQ_CAP_HEAT_CONTROL | EQ_CAP_POWER_PCT | EQ_CAP_TIMER_CONTROL |

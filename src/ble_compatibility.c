@@ -12,7 +12,7 @@
  */
 static const ble_compatible_device_t s_compatible_devices[] = {
     {
-        .model_name      = "Grainfather G30 Connect",
+        .model_name      = "Grainfather G30",
         .equipment_type  = EQUIPMENT_TYPE_BOILER,
         .name_prefix     = "Grain",
         .svc_uuid16      = 0xCDD0,
