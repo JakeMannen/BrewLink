@@ -23,7 +23,7 @@
 #include "cJSON.h"
 
 #include "config.h"
-#include "unified_schema.h"
+#include "g30_schema.h"
 #include "grainfather_g30.h"
 #include "g30_controller.h"
 #include "config_store.h"
@@ -47,8 +47,8 @@ static SemaphoreHandle_t s_g30_state_mutex = NULL;
 static char s_gateway_id[GATEWAY_ID_MAX_LEN] = {0};
 
 // Cached unified state for the Grainfather G30 (kept synchronized with equipment_manager)
-static unified_boiler_state_t s_g30_state;
-static unified_boiler_state_t s_prev_state;
+static g30_state_t s_g30_state;
+static g30_state_t s_prev_state;
 static uint32_t s_last_telemetry_pub_ms = 0;
 
 // Helper: parse MAC string (e.g. "C44F331A8B22" or "C4:4F:33:1A:8B:22") into 6-byte array
@@ -229,7 +229,7 @@ static void on_ble_cmd_seq_complete(const uint8_t mac[6],
 // -----------------------------------------------------------------------------
 // G30 Controller Public Bridge API (Delegates to Equipment Manager)
 // -----------------------------------------------------------------------------
-esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
+esp_err_t g30_controller_get_state(g30_state_t *out_state,
                                    bool *out_connected,
                                    uint8_t out_mac[6],
                                    int8_t *out_rssi) {
@@ -306,7 +306,7 @@ esp_err_t g30_controller_get_state(unified_boiler_state_t *out_state,
     return ESP_OK;
 }
 
-esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
+esp_err_t g30_controller_dispatch_command(const g30_command_t *cmd) {
     if (cmd == NULL || s_ble_cmd_queue == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -315,7 +315,7 @@ esp_err_t g30_controller_dispatch_command(const unified_command_t *cmd) {
     return equipment_manager_dispatch_command(cmd, resolved_mac);
 }
 
-esp_err_t g30_controller_dispatch_recipe(const unified_recipe_t *recipe) {
+esp_err_t g30_controller_dispatch_recipe(const g30_recipe_t *recipe) {
     if (recipe == NULL || s_ble_cmd_queue == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -435,7 +435,7 @@ static void process_inbound_command(const char *topic, const char *payload, int 
     if (tname_item == NULL && params) tname_item = cJSON_GetObjectItem(params, "equipment_name");
     if (tname_item == NULL) tname_item = cJSON_GetObjectItem(root, "equipment_name");
 
-    unified_command_t cmd;
+    g30_command_t cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.equipment_type = eq_type;
     cmd.target_slot = target_slot;
@@ -451,53 +451,77 @@ static void process_inbound_command(const char *topic, const char *payload, int 
     bool is_recipe = false;
 
     if (strcmp(action_str, "set_pump") == 0) {
-        cmd.action = CMD_ACTION_SET_PUMP;
+        cmd.action = G30_CMD_ACTION_SET_PUMP;
         cJSON *state = params ? cJSON_GetObjectItem(params, "state") : NULL;
         cmd.params.pump_state = state ? cJSON_IsTrue(state) : false;
         handled = true;
     } else if (strcmp(action_str, "set_heat") == 0) {
-        cmd.action = CMD_ACTION_SET_HEAT;
+        cmd.action = G30_CMD_ACTION_SET_HEAT;
         cJSON *state = params ? cJSON_GetObjectItem(params, "state") : NULL;
         cJSON *pwr = params ? cJSON_GetObjectItem(params, "power_pct") : NULL;
         cmd.params.heat.heat_state = state ? cJSON_IsTrue(state) : false;
         cmd.params.heat.power_pct = (pwr && cJSON_IsNumber(pwr)) ? (uint8_t)pwr->valueint : 100;
         handled = true;
     } else if (strcmp(action_str, "set_target_temp") == 0) {
-        cmd.action = CMD_ACTION_SET_TARGET_TEMP;
+        cmd.action = G30_CMD_ACTION_SET_TARGET_TEMP;
         cJSON *temp = params ? cJSON_GetObjectItem(params, "temp_c") : NULL;
         cmd.params.target_temp_c = (temp && cJSON_IsNumber(temp)) ? (float)temp->valuedouble : 0.0f;
         handled = true;
     } else if (strcmp(action_str, "set_timer") == 0) {
-        cmd.action = CMD_ACTION_SET_TIMER;
+        cmd.action = G30_CMD_ACTION_SET_TIMER;
         cJSON *dur = params ? cJSON_GetObjectItem(params, "duration_min") : NULL;
         cmd.params.timer_duration_min = (dur && cJSON_IsNumber(dur)) ? (uint16_t)dur->valueint : 0;
         handled = true;
+    } else if (strcmp(action_str, "toggle_timer") == 0) {
+        cmd.action = G30_CMD_ACTION_TOGGLE_TIMER;
+        handled = true;
     } else if (strcmp(action_str, "pause_timer") == 0) {
-        cmd.action = CMD_ACTION_PAUSE_TIMER;
+        cmd.action = G30_CMD_ACTION_PAUSE_TIMER;
         handled = true;
     } else if (strcmp(action_str, "resume_timer") == 0) {
-        cmd.action = CMD_ACTION_RESUME_TIMER;
+        cmd.action = G30_CMD_ACTION_RESUME_TIMER;
         handled = true;
     } else if (strcmp(action_str, "cancel_timer") == 0) {
-        cmd.action = CMD_ACTION_CANCEL_TIMER;
+        cmd.action = G30_CMD_ACTION_CANCEL_TIMER;
         handled = true;
     } else if (strcmp(action_str, "ack_interaction") == 0) {
-        cmd.action = CMD_ACTION_ACK_INTERACTION;
+        cmd.action = G30_CMD_ACTION_ACK_INTERACTION;
         handled = true;
     } else if (strcmp(action_str, "press_set") == 0) {
-        cmd.action = CMD_ACTION_PRESS_SET;
+        cmd.action = G30_CMD_ACTION_PRESS_SET;
         handled = true;
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
-        cmd.action = CMD_ACTION_DISMISS_ALERT;
+        cmd.action = G30_CMD_ACTION_DISMISS_ALERT;
         handled = true;
     } else if (strcmp(action_str, "dismiss_sparge_alert") == 0) {
-        cmd.action = CMD_ACTION_DISMISS_SPARGE_ALERT;
+        cmd.action = G30_CMD_ACTION_DISMISS_SPARGE_ALERT;
         handled = true;
     } else if (strcmp(action_str, "cancel_session") == 0) {
-        cmd.action = CMD_ACTION_CANCEL_SESSION;
+        cmd.action = G30_CMD_ACTION_CANCEL_SESSION;
         handled = true;
+    } else if (strcmp(action_str, "temp_up") == 0) {
+        cmd.action = G30_CMD_ACTION_TEMP_UP;
+        handled = true;
+    } else if (strcmp(action_str, "temp_down") == 0) {
+        cmd.action = G30_CMD_ACTION_TEMP_DOWN;
+        handled = true;
+    } else if (strcmp(action_str, "disconnect_manual") == 0) {
+        cmd.action = G30_CMD_ACTION_DISCONNECT_MANUAL;
+        handled = true;
+    } else if (strcmp(action_str, "disconnect_auto") == 0) {
+        cmd.action = G30_CMD_ACTION_DISCONNECT_AUTO;
+        handled = true;
+    } else if (strcmp(action_str, "delayed_heat") == 0) {
+        cmd.action = G30_CMD_ACTION_DELAYED_HEAT;
+        cJSON *dm = params ? cJSON_GetObjectItem(params, "minutes") : NULL;
+        cJSON *ds = params ? cJSON_GetObjectItem(params, "seconds") : NULL;
+        if (dm && cJSON_IsNumber(dm) && dm->valueint >= 0 && dm->valueint <= 999) {
+            cmd.params.delayed_heat.minutes = (uint16_t)dm->valueint;
+            cmd.params.delayed_heat.seconds = (ds && cJSON_IsNumber(ds) && ds->valueint >= 0 && ds->valueint < 60) ? (uint8_t)ds->valueint : 0;
+            handled = true;
+        }
     } else if (strcmp(action_str, "load_recipe") == 0) {
-        cmd.action = CMD_ACTION_LOAD_RECIPE;
+        cmd.action = G30_CMD_ACTION_LOAD_RECIPE;
         is_recipe = true;
         handled = true;
 
@@ -637,7 +661,7 @@ static void on_mqtt_connection_status_change(bool connected) {
                          peers[i].addr[0], peers[i].addr[1], peers[i].addr[2],
                          peers[i].addr[3], peers[i].addr[4], peers[i].addr[5]);
 
-                unified_boiler_state_t b_state = s_g30_state;
+                g30_state_t b_state = s_g30_state;
                 bool g30_conn = false;
                 g30_controller_get_state(&b_state, &g30_conn, NULL, NULL);
 
@@ -650,7 +674,7 @@ static void on_mqtt_connection_status_change(bool connected) {
                          "\"pump\":{\"active\":%s},"
                          "\"timer\":{\"active\":%s,\"paused\":%s,\"remaining_seconds\":%lu,\"total_seconds\":%lu},"
                          "\"stage\":{\"step_index\":%u,\"auto_mode\":%s},"
-                         "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
+                         "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"},\"flags\":{\"delayed_heat\":%s,\"interrupted\":%s,\"manual_power\":%s,\"sparge_alert\":%s},\"error_code\":%u"
                          "},\"timestamp_ms\":%lu}",
                          mac_str,
                          equip_type_to_str(peers[i].equipment_type),
@@ -670,6 +694,11 @@ static void on_mqtt_connection_status_change(bool connected) {
                          b_state.interaction.required ? "true" : "false",
                          b_state.interaction.code,
                          b_state.interaction.message,
+                         b_state.delayed_heat ? "true" : "false",
+                         b_state.interrupted ? "true" : "false",
+                         b_state.manual_power ? "true" : "false",
+                         b_state.sparge_alert ? "true" : "false",
+                         b_state.error_code,
                          (unsigned long)esp_log_timestamp());
 
                 mqtt_manager_publish_equipment_snapshot(mac_str, snapshot_json);
@@ -752,7 +781,10 @@ static void telemetry_relay_task(void *pvParameters) {
                                         (s_g30_state.interaction.required != s_prev_state.interaction.required) ||
                                         (s_g30_state.interaction.code != s_prev_state.interaction.code) ||
                                         (s_g30_state.timer.active != s_prev_state.timer.active) ||
-                                        (s_g30_state.timer.paused != s_prev_state.timer.paused);
+                                        (s_g30_state.timer.paused != s_prev_state.timer.paused) ||
+                                        (s_g30_state.delayed_heat != s_prev_state.delayed_heat) ||
+                                        (s_g30_state.sparge_alert != s_prev_state.sparge_alert) ||
+                                        (s_g30_state.error_code != s_prev_state.error_code);
 
                 uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
                 float temp_delta = fabsf(s_g30_state.current_temp_c - s_prev_state.current_temp_c);
@@ -768,7 +800,7 @@ static void telemetry_relay_task(void *pvParameters) {
                              "\"pump\":{\"active\":%s},"
                              "\"timer\":{\"active\":%s,\"paused\":%s,\"remaining_seconds\":%lu,\"total_seconds\":%lu},"
                              "\"stage\":{\"step_index\":%u,\"auto_mode\":%s},"
-                             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
+                             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"},\"flags\":{\"delayed_heat\":%s,\"interrupted\":%s,\"manual_power\":%s,\"sparge_alert\":%s},\"error_code\":%u"
                              "},\"timestamp_ms\":%lu}",
                              mac_str, packet.rssi,
                              s_g30_state.current_temp_c, s_g30_state.target_temp_c, s_g30_state.boil_temp_c,
@@ -785,6 +817,11 @@ static void telemetry_relay_task(void *pvParameters) {
                              s_g30_state.interaction.required ? "true" : "false",
                              s_g30_state.interaction.code,
                              s_g30_state.interaction.message,
+                             s_g30_state.delayed_heat ? "true" : "false",
+                             s_g30_state.interrupted ? "true" : "false",
+                             s_g30_state.manual_power ? "true" : "false",
+                             s_g30_state.sparge_alert ? "true" : "false",
+                             s_g30_state.error_code,
                              (unsigned long)packet.timestamp_ms);
 
                     if (mqtt_manager_is_connected()) {

@@ -1,29 +1,22 @@
-#ifndef BREWLINK_UNIFIED_SCHEMA_H
-#define BREWLINK_UNIFIED_SCHEMA_H
+/**
+ * @file g30_schema.h
+ * @brief Data schema for the Grainfather G30 Connect ONLY.
+ * @note Each supported equipment model owns its own schema header (<model>_schema.h).
+ */
+#ifndef BREWLINK_G30_SCHEMA_H
+#define BREWLINK_G30_SCHEMA_H
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "equipment_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // =============================================================================
-// Equipment Types Taxonomy
-// =============================================================================
-typedef enum {
-    EQUIPMENT_TYPE_UNKNOWN       = 0,
-    EQUIPMENT_TYPE_BOILER        = 1, // All-in-one brewing systems (Grainfather G30, BrewZilla)
-    EQUIPMENT_TYPE_FERMENTER     = 2, // Conical fermenters, digital hydrometers (Tilt, Plaato)
-    EQUIPMENT_TYPE_COOLER_HEATER = 3  // Glycol chillers, heating belts/jackets
-} equipment_type_t;
-
-#define EQUIPMENT_TYPE_GENERIC       EQUIPMENT_TYPE_UNKNOWN
-#define EQUIPMENT_TYPE_COOLER        EQUIPMENT_TYPE_COOLER_HEATER
-
-// =============================================================================
-// Unified Boiler State Schema (e.g. Grainfather G30)
+// Grainfather G30 Connect State Schema (G30-specific; not shared with other equipment)
 // =============================================================================
 #define MAX_STEP_NAME_LEN           24
 #define MAX_INTERACTION_MSG_LEN     64
@@ -37,6 +30,11 @@ typedef struct {
     bool     pump_active;
     bool     auto_mode;             // true = recipe / auto schedule, false = manual
     bool     ramp_active;           // true = heating to next step setpoint
+    bool     delayed_heat;          // true = delayed heating start is scheduled (Y notification)
+    bool     interrupted;           // W notification: process interrupted flag
+    bool     manual_power;          // W notification: manual power mode flag
+    bool     sparge_alert;          // W notification: sparge alert flag
+    uint8_t  error_code;            // E notification: last controller error code (0 = none)
     
     struct {
         bool     active;
@@ -57,41 +55,10 @@ typedef struct {
     } interaction;
 
     uint32_t last_updated_ms;
-} unified_boiler_state_t;
+} g30_state_t;
 
 // =============================================================================
-// Unified Fermenter State Schema (for future equipment expansion)
-// =============================================================================
-typedef struct {
-    float    beer_temp_c;
-    float    chamber_temp_c;
-    float    target_temp_c;
-    float    gravity_sg;             // e.g. 1.050
-    bool     cooling_active;
-    bool     heating_active;
-    uint32_t fermentation_age_hours;
-    uint32_t last_updated_ms;
-} unified_fermenter_state_t;
-
-// =============================================================================
-// Unified Cooler / Heater State Schema (for future equipment expansion)
-// =============================================================================
-#define MAX_CHILLER_ZONES           4
-
-typedef struct {
-    float    reservoir_temp_c;
-    uint8_t  active_zones_count;
-    struct {
-        float current_temp_c;
-        float target_temp_c;
-        bool  pump_running;
-        bool  heating_active;
-    } zones[MAX_CHILLER_ZONES];
-    uint32_t last_updated_ms;
-} unified_cooler_heater_state_t;
-
-// =============================================================================
-// Unified Recipe Definitions (Equipment-Agnostic: Boilers, Fermenters, Coolers)
+// Grainfather G30 Connect Recipe Definitions
 // =============================================================================
 #define MAX_MASH_STEPS              8
 #define MAX_BOIL_ADDITIONS          8
@@ -101,12 +68,12 @@ typedef struct {
 typedef struct {
     float    temp_c;
     uint16_t duration_min;
-} unified_mash_step_t;
+} g30_mash_step_t;
 
 typedef struct {
     float    temp_c;
     uint16_t duration_hours;
-} unified_fermentation_step_t;
+} g30_fermentation_step_t;
 
 typedef struct {
     char                        name[MAX_RECIPE_NAME_LEN];
@@ -115,41 +82,47 @@ typedef struct {
     float                       mash_water_l;
     float                       sparge_water_l;
     uint8_t                     mash_step_count;
-    unified_mash_step_t         mash_steps[MAX_MASH_STEPS];
+    g30_mash_step_t         mash_steps[MAX_MASH_STEPS];
     uint8_t                     boil_addition_count;
     uint16_t                    boil_additions_min[MAX_BOIL_ADDITIONS]; // time remaining in boil
     uint8_t                     fermentation_step_count;
-    unified_fermentation_step_t fermentation_steps[MAX_FERMENTATION_STEPS];
+    g30_fermentation_step_t fermentation_steps[MAX_FERMENTATION_STEPS];
     float                       target_og_sg;
     float                       target_fg_sg;
-} unified_recipe_t;
+} g30_recipe_t;
 
 // =============================================================================
-// Unified Downstream Command Actions (WiFi / Dashboard -> Gateway -> BLE)
+// Grainfather G30 Connect Downstream Command Actions (WiFi / Dashboard -> Gateway -> BLE)
 // =============================================================================
 typedef enum {
-    CMD_ACTION_NONE                 = 0,
-    CMD_ACTION_SET_PUMP             = 1,
-    CMD_ACTION_SET_HEAT             = 2,
-    CMD_ACTION_SET_TARGET_TEMP      = 3,
-    CMD_ACTION_SET_TIMER            = 4,
-    CMD_ACTION_PAUSE_TIMER          = 5,
-    CMD_ACTION_RESUME_TIMER         = 6,
-    CMD_ACTION_CANCEL_TIMER         = 7,
-    CMD_ACTION_ACK_INTERACTION      = 8,
-    CMD_ACTION_DISMISS_ALERT        = 9,
-    CMD_ACTION_LOAD_RECIPE          = 10,
-    CMD_ACTION_CANCEL_SESSION       = 11,
-    CMD_ACTION_PRESS_SET            = 12,
-    CMD_ACTION_DISMISS_SPARGE_ALERT = 13
-} command_action_t;
+    G30_CMD_ACTION_NONE                 = 0,
+    G30_CMD_ACTION_SET_PUMP             = 1,
+    G30_CMD_ACTION_SET_HEAT             = 2,
+    G30_CMD_ACTION_SET_TARGET_TEMP      = 3,
+    G30_CMD_ACTION_SET_TIMER            = 4,
+    G30_CMD_ACTION_PAUSE_TIMER          = 5,
+    G30_CMD_ACTION_RESUME_TIMER         = 6,
+    G30_CMD_ACTION_CANCEL_TIMER         = 7,
+    G30_CMD_ACTION_ACK_INTERACTION      = 8,
+    G30_CMD_ACTION_DISMISS_ALERT        = 9,
+    G30_CMD_ACTION_LOAD_RECIPE          = 10,
+    G30_CMD_ACTION_CANCEL_SESSION       = 11,
+    G30_CMD_ACTION_PRESS_SET            = 12,
+    G30_CMD_ACTION_DISMISS_SPARGE_ALERT = 13,
+    G30_CMD_ACTION_TEMP_UP              = 14,
+    G30_CMD_ACTION_TEMP_DOWN            = 15,
+    G30_CMD_ACTION_DELAYED_HEAT         = 16,
+    G30_CMD_ACTION_DISCONNECT_MANUAL    = 17,
+    G30_CMD_ACTION_DISCONNECT_AUTO      = 18,
+    G30_CMD_ACTION_TOGGLE_TIMER         = 19  // raw G30 pause/resume toggle (G)
+} g30_command_action_t;
 
 typedef struct {
     uint8_t          target_mac[6];
     uint8_t          target_slot;    // Optional 1-based slot index (1..3); 0 = not specified
     char             target_name[32];// Optional unique device name
     equipment_type_t equipment_type;
-    command_action_t action;
+    g30_command_action_t action;
     char             req_id[16];
     union {
         bool             pump_state;
@@ -159,9 +132,13 @@ typedef struct {
         } heat;
         float            target_temp_c;
         uint16_t         timer_duration_min;
-        unified_recipe_t recipe;
+        struct {
+            uint16_t minutes;
+            uint8_t  seconds;
+        } delayed_heat;
+        g30_recipe_t recipe;
     } params;
-} unified_command_t;
+} g30_command_t;
 
 // Structure for outbound BLE commands queued to Core 0 NimBLE worker
 #define BLE_G30_MAX_CMD_PAYLOAD     20
@@ -182,4 +159,5 @@ typedef struct {
 }
 #endif
 
-#endif // BREWLINK_UNIFIED_SCHEMA_H
+#endif // BREWLINK_G30_SCHEMA_H
+

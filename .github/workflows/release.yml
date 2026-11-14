@@ -15,12 +15,14 @@ on:
     paths:
       - 'src/**'
       - 'include/**'
+      - 'test/**'
       - 'platformio.ini'
       - 'CMakeLists.txt'
       - 'partitions.csv'
       - 'sdkconfig.defaults'
       - 'sdkconfig.*'
       - 'dependencies.lock'
+      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       release_type:
@@ -72,6 +74,7 @@ jobs:
       - name: Determine next version from GitHub Flow & Conventional Commits
         id: semver
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_RELEASE_TYPE: ${{ inputs.release_type || 'auto' }}
           INPUT_BUMP_OVERRIDE: ${{ inputs.bump_override || 'auto' }}
           REF_NAME: ${{ github.ref_name }}
@@ -81,6 +84,7 @@ jobs:
           set -euo pipefail
 
           git fetch --tags --force
+          git fetch origin main --depth=200 || true
 
           # Find the latest stable SemVer tag (vMAJOR.MINOR.PATCH without prerelease suffix)
           LATEST_STABLE_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
@@ -156,16 +160,27 @@ jobs:
           fi
 
           if [ "$IS_PRERELEASE" = "true" ]; then
-            # Sanitize GitHub Flow branch name into a SemVer prerelease identifier
-            BRANCH_SLUG=$(echo "$REF_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
-            if [ -z "$BRANCH_SLUG" ] || [ "$BRANCH_SLUG" = "main" ]; then
-              BRANCH_SLUG="pre"
+            # Calculate PR commit increment count relative to main
+            COMMIT_INCREMENT=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo "")
+            if [ -z "$COMMIT_INCREMENT" ] || [ "$COMMIT_INCREMENT" -le 0 ]; then
+              COMMIT_INCREMENT=$(git rev-list --count HEAD 2>/dev/null || echo "1")
             fi
-            SHORT_COMMIT="${SHORT_SHA:0:7}"
-            FINAL_VERSION="${BASE_VERSION}-${BRANCH_SLUG}.${RUN_NUMBER}.${SHORT_COMMIT}"
+            if [ -z "$COMMIT_INCREMENT" ] || [ "$COMMIT_INCREMENT" -le 0 ]; then
+              COMMIT_INCREMENT=1
+            fi
+
+            FINAL_VERSION="${BASE_VERSION}-prerelease-${COMMIT_INCREMENT}"
+
+            # Ensure tag does not collide with an existing tag or release on GitHub
+            while git rev-parse "v${FINAL_VERSION}" >/dev/null 2>&1 || \
+                  gh release view "v${FINAL_VERSION}" >/dev/null 2>&1; do
+              COMMIT_INCREMENT=$((COMMIT_INCREMENT + 1))
+              FINAL_VERSION="${BASE_VERSION}-prerelease-${COMMIT_INCREMENT}"
+            done
           else
             # Ensure stable tag does not collide with an existing tag
-            while git rev-parse "v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1; do
+            while git rev-parse "v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1 || \
+                  gh release view "v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1; do
               PATCH=$((PATCH + 1))
             done
             BASE_VERSION="${MAJOR}.${MINOR}.${PATCH}"
@@ -200,7 +215,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-          cache: 'pip'
 
       - name: Cache PlatformIO Core & Platforms
         uses: actions/cache@v6
@@ -268,6 +282,16 @@ jobs:
             0x8000 "${BUILD_DIR}/partitions.bin" \
             0x10000 "${BUILD_DIR}/firmware.bin"
 
+          # Create complete release bundle zip
+          (
+            cd "$OUT_DIR"
+            zip "${PREFIX}.zip" "${PREFIX}-factory.bin" \
+                                "${PREFIX}-firmware.bin" \
+                                "${PREFIX}-bootloader.bin" \
+                                "${PREFIX}-partitions.bin" \
+                                "${PREFIX}-firmware.elf"
+          )
+
           # Generate SHA-256 checksums for all firmware release files
           (
             cd "$OUT_DIR"
@@ -275,7 +299,8 @@ jobs:
                       "${PREFIX}-firmware.bin" \
                       "${PREFIX}-bootloader.bin" \
                       "${PREFIX}-partitions.bin" \
-                      "${PREFIX}-firmware.elf" > SHA256SUMS.txt
+                      "${PREFIX}-firmware.elf" \
+                      "${PREFIX}.zip" > SHA256SUMS.txt
           )
 
           ls -lh "$OUT_DIR"
@@ -370,6 +395,7 @@ jobs:
             echo ""
             echo "| File | Flash Offset | Description |"
             echo "| :--- | :--- | :--- |"
+            echo "| \`${PREFIX}.zip\` | — | Complete firmware release package bundle (.zip) |"
             echo "| \`${PREFIX}-factory.bin\` | \`0x0000\` | Complete merged factory image (Bootloader + Partitions + App) |"
             echo "| \`${PREFIX}-firmware.bin\` | \`0x10000\` | Application firmware binary (for OTA or partition flash) |"
             echo "| \`${PREFIX}-bootloader.bin\` | \`0x1000\` | ESP32 second-stage bootloader |"
@@ -409,4 +435,10 @@ jobs:
             RELEASE_ARGS+=(--latest)
           fi
 
-          gh release create "${RELEASE_ARGS[@]}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating release notes and assets..."
+            gh release edit "$TAG" --title "$RELEASE_TITLE" --notes-file "$NOTES_FILE"
+            gh release upload "$TAG" release-firmware/* --clobber
+          else
+            gh release create "${RELEASE_ARGS[@]}"
+          fi

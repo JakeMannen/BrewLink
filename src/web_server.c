@@ -104,9 +104,9 @@ static bool verify_external_request_auth(httpd_req_t *req) {
     return true;
 }
 
-// Helper: parse a cJSON recipe object into unified_recipe_t
-static void parse_json_recipe_object(cJSON *rec, unified_recipe_t *out_recipe) {
-    memset(out_recipe, 0, sizeof(unified_recipe_t));
+// Helper: parse a cJSON recipe object into g30_recipe_t
+static void parse_json_recipe_object(cJSON *rec, g30_recipe_t *out_recipe) {
+    memset(out_recipe, 0, sizeof(g30_recipe_t));
     if (rec == NULL) return;
 
     cJSON *name_item = cJSON_GetObjectItem(rec, "name");
@@ -203,7 +203,7 @@ static cJSON *serialize_equipment_slot_cjson(const equipment_slot_t *slot, uint8
 
     cJSON *st = cJSON_AddObjectToObject(item, "state");
     if (slot->equipment_type == EQUIPMENT_TYPE_BOILER) {
-        const unified_boiler_state_t *b = &slot->state.boiler;
+        const g30_state_t *b = &slot->state.boiler;
         cJSON_AddNumberToObject(st, "current_temp_c", (double)b->current_temp_c);
         cJSON_AddNumberToObject(st, "target_temp_c", (double)b->target_temp_c);
         cJSON_AddNumberToObject(st, "boil_temp_c", (double)b->boil_temp_c);
@@ -212,6 +212,11 @@ static cJSON *serialize_equipment_slot_cjson(const equipment_slot_t *slot, uint8
         cJSON_AddBoolToObject(st, "pump_active", b->pump_active);
         cJSON_AddBoolToObject(st, "auto_mode", b->auto_mode);
         cJSON_AddBoolToObject(st, "ramp_active", b->ramp_active);
+        cJSON_AddBoolToObject(st, "delayed_heat", b->delayed_heat);
+        cJSON_AddBoolToObject(st, "interrupted", b->interrupted);
+        cJSON_AddBoolToObject(st, "manual_power", b->manual_power);
+        cJSON_AddBoolToObject(st, "sparge_alert", b->sparge_alert);
+        cJSON_AddNumberToObject(st, "error_code", b->error_code);
 
         cJSON *tm = cJSON_AddObjectToObject(st, "timer");
         cJSON_AddBoolToObject(tm, "active", b->timer.active);
@@ -228,13 +233,13 @@ static cJSON *serialize_equipment_slot_cjson(const equipment_slot_t *slot, uint8
         cJSON_AddNumberToObject(ia, "code", b->interaction.code);
         cJSON_AddStringToObject(ia, "message", b->interaction.message[0] ? b->interaction.message : "Normal operation");
     } else if (slot->equipment_type == EQUIPMENT_TYPE_FERMENTER) {
-        const unified_fermenter_state_t *f = &slot->state.fermenter;
+        const placeholder_fermenter_state_t *f = &slot->state.fermenter;
         cJSON_AddNumberToObject(st, "beer_temp_c", (double)f->beer_temp_c);
         cJSON_AddNumberToObject(st, "chamber_temp_c", (double)f->chamber_temp_c);
         cJSON_AddNumberToObject(st, "target_temp_c", (double)f->target_temp_c);
         cJSON_AddNumberToObject(st, "gravity_sg", (double)f->gravity_sg);
     } else if (slot->equipment_type == EQUIPMENT_TYPE_COOLER_HEATER) {
-        const unified_cooler_heater_state_t *c = &slot->state.cooler;
+        const placeholder_cooler_state_t *c = &slot->state.cooler;
         cJSON_AddNumberToObject(st, "reservoir_temp_c", (double)c->reservoir_temp_c);
         cJSON_AddNumberToObject(st, "current_temp_c", (double)c->zones[0].current_temp_c);
         cJSON_AddNumberToObject(st, "target_temp_c", (double)c->zones[0].target_temp_c);
@@ -633,7 +638,7 @@ static esp_err_t api_equipment_recipe_post_handler(httpd_req_t *req) {
     if (rec_obj == NULL) rec_obj = cJSON_GetObjectItem(root, "recipe");
     if (rec_obj == NULL) rec_obj = scope;
 
-    unified_recipe_t recipe;
+    g30_recipe_t recipe;
     parse_json_recipe_object(rec_obj, &recipe);
     cJSON_Delete(root);
 
@@ -682,9 +687,9 @@ static esp_err_t api_equipment_recipe_post_handler(httpd_req_t *req) {
     return httpd_resp_send(req, resp_buf, HTTPD_RESP_USE_STRLEN);
 }
 
-// Helper: parse control JSON and populate unified_command_t
-static bool parse_json_control_command(cJSON *root, unified_command_t *cmd) {
-    memset(cmd, 0, sizeof(unified_command_t));
+// Helper: parse control JSON and populate g30_command_t
+static bool parse_json_control_command(cJSON *root, g30_command_t *cmd) {
+    memset(cmd, 0, sizeof(g30_command_t));
 
     cJSON *req_id_item = cJSON_GetObjectItem(root, "req_id");
     if (req_id_item && cJSON_IsString(req_id_item) && req_id_item->valuestring != NULL) {
@@ -729,49 +734,74 @@ static bool parse_json_control_command(cJSON *root, unified_command_t *cmd) {
 
     const char *action_str = action_item->valuestring;
     if (strcmp(action_str, "set_pump") == 0) {
-        cmd->action = CMD_ACTION_SET_PUMP;
+        cmd->action = G30_CMD_ACTION_SET_PUMP;
         cJSON *st = cJSON_GetObjectItem(scope, "state");
         cmd->params.pump_state = (st && cJSON_IsTrue(st));
         return true;
     } else if (strcmp(action_str, "set_heat") == 0) {
-        cmd->action = CMD_ACTION_SET_HEAT;
+        cmd->action = G30_CMD_ACTION_SET_HEAT;
         cJSON *st = cJSON_GetObjectItem(scope, "state");
         cJSON *pwr = cJSON_GetObjectItem(scope, "power_pct");
         cmd->params.heat.heat_state = (st && cJSON_IsTrue(st));
         cmd->params.heat.power_pct = (pwr && cJSON_IsNumber(pwr)) ? (uint8_t)pwr->valueint : 100;
         return true;
     } else if (strcmp(action_str, "set_target_temp") == 0) {
-        cmd->action = CMD_ACTION_SET_TARGET_TEMP;
+        cmd->action = G30_CMD_ACTION_SET_TARGET_TEMP;
         cJSON *temp = cJSON_GetObjectItem(scope, "temp_c");
         if (temp && cJSON_IsNumber(temp)) {
             cmd->params.target_temp_c = (float)temp->valuedouble;
             return true;
         }
     } else if (strcmp(action_str, "ack_interaction") == 0) {
-        cmd->action = CMD_ACTION_ACK_INTERACTION;
+        cmd->action = G30_CMD_ACTION_ACK_INTERACTION;
         return true;
     } else if (strcmp(action_str, "press_set") == 0) {
-        cmd->action = CMD_ACTION_PRESS_SET;
+        cmd->action = G30_CMD_ACTION_PRESS_SET;
         return true;
     } else if (strcmp(action_str, "dismiss_alert") == 0) {
-        cmd->action = CMD_ACTION_DISMISS_ALERT;
+        cmd->action = G30_CMD_ACTION_DISMISS_ALERT;
         return true;
     } else if (strcmp(action_str, "dismiss_sparge_alert") == 0) {
-        cmd->action = CMD_ACTION_DISMISS_SPARGE_ALERT;
+        cmd->action = G30_CMD_ACTION_DISMISS_SPARGE_ALERT;
         return true;
     } else if (strcmp(action_str, "cancel_session") == 0) {
-        cmd->action = CMD_ACTION_CANCEL_SESSION;
+        cmd->action = G30_CMD_ACTION_CANCEL_SESSION;
         return true;
-    } else if (strcmp(action_str, "toggle_timer") == 0 ||
-               strcmp(action_str, "pause_timer") == 0 ||
-               strcmp(action_str, "resume_timer") == 0) {
-        cmd->action = CMD_ACTION_PAUSE_TIMER;
+    } else if (strcmp(action_str, "temp_up") == 0) {
+        cmd->action = G30_CMD_ACTION_TEMP_UP;
+        return true;
+    } else if (strcmp(action_str, "temp_down") == 0) {
+        cmd->action = G30_CMD_ACTION_TEMP_DOWN;
+        return true;
+    } else if (strcmp(action_str, "disconnect_manual") == 0) {
+        cmd->action = G30_CMD_ACTION_DISCONNECT_MANUAL;
+        return true;
+    } else if (strcmp(action_str, "disconnect_auto") == 0) {
+        cmd->action = G30_CMD_ACTION_DISCONNECT_AUTO;
+        return true;
+    } else if (strcmp(action_str, "delayed_heat") == 0) {
+        cmd->action = G30_CMD_ACTION_DELAYED_HEAT;
+        cJSON *dm = cJSON_GetObjectItem(scope, "minutes");
+        cJSON *ds = cJSON_GetObjectItem(scope, "seconds");
+        if (dm && cJSON_IsNumber(dm) && dm->valueint >= 0 && dm->valueint <= 999) {
+            cmd->params.delayed_heat.minutes = (uint16_t)dm->valueint;
+            cmd->params.delayed_heat.seconds = (ds && cJSON_IsNumber(ds) && ds->valueint >= 0 && ds->valueint < 60) ? (uint8_t)ds->valueint : 0;
+            return true;
+        }
+    } else if (strcmp(action_str, "toggle_timer") == 0) {
+        cmd->action = G30_CMD_ACTION_TOGGLE_TIMER;
+        return true;
+    } else if (strcmp(action_str, "pause_timer") == 0) {
+        cmd->action = G30_CMD_ACTION_PAUSE_TIMER;
+        return true;
+    } else if (strcmp(action_str, "resume_timer") == 0) {
+        cmd->action = G30_CMD_ACTION_RESUME_TIMER;
         return true;
     } else if (strcmp(action_str, "cancel_timer") == 0) {
-        cmd->action = CMD_ACTION_CANCEL_TIMER;
+        cmd->action = G30_CMD_ACTION_CANCEL_TIMER;
         return true;
     } else if (strcmp(action_str, "set_timer") == 0) {
-        cmd->action = CMD_ACTION_SET_TIMER;
+        cmd->action = G30_CMD_ACTION_SET_TIMER;
         cJSON *dur = cJSON_GetObjectItem(scope, "duration_min");
         if (dur && cJSON_IsNumber(dur) && dur->valueint > 0) {
             cmd->params.timer_duration_min = (uint16_t)dur->valueint;
@@ -809,7 +839,7 @@ static esp_err_t api_equipment_control_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    unified_command_t cmd;
+    g30_command_t cmd;
     bool valid = parse_json_control_command(root, &cmd);
     cJSON_Delete(root);
 
@@ -996,7 +1026,7 @@ static esp_err_t ws_handler(httpd_req_t *req) {
             if (rec_obj == NULL) rec_obj = cJSON_GetObjectItem(root, "recipe");
             if (rec_obj == NULL) rec_obj = scope;
 
-            unified_recipe_t recipe;
+            g30_recipe_t recipe;
             parse_json_recipe_object(rec_obj, &recipe);
             cJSON_Delete(root);
 
@@ -1020,7 +1050,7 @@ static esp_err_t ws_handler(httpd_req_t *req) {
             // Note: Final "success" or mid-transfer "error" cmd_ack is broadcast by BLE sequence completion callback
             return ESP_OK;
         } else {
-            unified_command_t cmd;
+            g30_command_t cmd;
             bool ok = parse_json_control_command(root, &cmd);
             cJSON_Delete(root);
             if (!ok) {
@@ -1387,7 +1417,7 @@ static esp_err_t api_ble_disconnect_post_handler(httpd_req_t *req) {
 
 // GET /api/g30/status - Get connected G30 status & telemetry
 static esp_err_t api_g30_status_get_handler(httpd_req_t *req) {
-    unified_boiler_state_t state;
+    g30_state_t state;
     bool connected = false;
     uint8_t mac[6] = {0};
     int8_t rssi = 0;
@@ -1418,6 +1448,11 @@ static esp_err_t api_g30_status_get_handler(httpd_req_t *req) {
         cJSON_AddBoolToObject(st, "pump_active", state.pump_active);
         cJSON_AddBoolToObject(st, "auto_mode", state.auto_mode);
         cJSON_AddBoolToObject(st, "ramp_active", state.ramp_active);
+        cJSON_AddBoolToObject(st, "delayed_heat", state.delayed_heat);
+        cJSON_AddBoolToObject(st, "interrupted", state.interrupted);
+        cJSON_AddBoolToObject(st, "manual_power", state.manual_power);
+        cJSON_AddBoolToObject(st, "sparge_alert", state.sparge_alert);
+        cJSON_AddNumberToObject(st, "error_code", state.error_code);
 
         cJSON *tm = cJSON_AddObjectToObject(st, "timer");
         cJSON_AddBoolToObject(tm, "active", state.timer.active);
@@ -1469,7 +1504,7 @@ static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    unified_command_t cmd;
+    g30_command_t cmd;
     bool valid = parse_json_control_command(root, &cmd);
     cJSON_Delete(root);
 

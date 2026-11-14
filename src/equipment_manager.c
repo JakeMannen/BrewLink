@@ -112,21 +112,27 @@ static void assign_unique_slot_name(int slot_idx,
     out_name[31] = '\0';
 }
 
-static const char *action_enum_to_str(command_action_t action) {
+static const char *action_enum_to_str(g30_command_action_t action) {
     switch (action) {
-        case CMD_ACTION_SET_PUMP:             return "set_pump";
-        case CMD_ACTION_SET_HEAT:             return "set_heat";
-        case CMD_ACTION_SET_TARGET_TEMP:      return "set_target_temp";
-        case CMD_ACTION_SET_TIMER:            return "set_timer";
-        case CMD_ACTION_PAUSE_TIMER:          return "pause_timer";
-        case CMD_ACTION_RESUME_TIMER:         return "resume_timer";
-        case CMD_ACTION_CANCEL_TIMER:         return "cancel_timer";
-        case CMD_ACTION_ACK_INTERACTION:      return "ack_interaction";
-        case CMD_ACTION_DISMISS_ALERT:        return "dismiss_alert";
-        case CMD_ACTION_LOAD_RECIPE:          return "load_recipe";
-        case CMD_ACTION_CANCEL_SESSION:       return "cancel_session";
-        case CMD_ACTION_PRESS_SET:            return "press_set";
-        case CMD_ACTION_DISMISS_SPARGE_ALERT: return "dismiss_sparge_alert";
+        case G30_CMD_ACTION_SET_PUMP:             return "set_pump";
+        case G30_CMD_ACTION_SET_HEAT:             return "set_heat";
+        case G30_CMD_ACTION_SET_TARGET_TEMP:      return "set_target_temp";
+        case G30_CMD_ACTION_SET_TIMER:            return "set_timer";
+        case G30_CMD_ACTION_PAUSE_TIMER:          return "pause_timer";
+        case G30_CMD_ACTION_RESUME_TIMER:         return "resume_timer";
+        case G30_CMD_ACTION_CANCEL_TIMER:         return "cancel_timer";
+        case G30_CMD_ACTION_ACK_INTERACTION:      return "ack_interaction";
+        case G30_CMD_ACTION_DISMISS_ALERT:        return "dismiss_alert";
+        case G30_CMD_ACTION_LOAD_RECIPE:          return "load_recipe";
+        case G30_CMD_ACTION_CANCEL_SESSION:       return "cancel_session";
+        case G30_CMD_ACTION_PRESS_SET:            return "press_set";
+        case G30_CMD_ACTION_DISMISS_SPARGE_ALERT: return "dismiss_sparge_alert";
+        case G30_CMD_ACTION_TOGGLE_TIMER:         return "toggle_timer";
+        case G30_CMD_ACTION_TEMP_UP:              return "temp_up";
+        case G30_CMD_ACTION_TEMP_DOWN:            return "temp_down";
+        case G30_CMD_ACTION_DELAYED_HEAT:         return "delayed_heat";
+        case G30_CMD_ACTION_DISCONNECT_MANUAL:    return "disconnect_manual";
+        case G30_CMD_ACTION_DISCONNECT_AUTO:      return "disconnect_auto";
         default:                              return "cmd";
     }
 }
@@ -156,8 +162,8 @@ static esp_err_t default_enqueue_ble_pkt(const ble_outbound_cmd_packet_t *pkt) {
 // Driver 1: Grainfather G30 Connect Driver (EQUIPMENT_TYPE_BOILER)
 // =============================================================================
 static void g30_drv_init_state(equipment_slot_t *slot) {
-    memset(&slot->state.boiler, 0, sizeof(unified_boiler_state_t));
-    memset(&slot->prev_state.boiler, 0, sizeof(unified_boiler_state_t));
+    memset(&slot->state.boiler, 0, sizeof(g30_state_t));
+    memset(&slot->prev_state.boiler, 0, sizeof(g30_state_t));
     slot->state.boiler.boil_temp_c = 100.0f;
     slot->prev_state.boiler.boil_temp_c = 100.0f;
     strncpy(slot->state.boiler.stage.step_name, "Manual Mode", sizeof(slot->state.boiler.stage.step_name) - 1);
@@ -170,20 +176,28 @@ static esp_err_t g30_drv_parse_notification(equipment_slot_t *slot, const uint8_
 }
 
 static esp_err_t g30_drv_dispatch_command(equipment_slot_t *slot,
-                                          const unified_command_t *cmd,
+                                          const g30_command_t *cmd,
                                           eq_enqueue_ble_pkt_fn_t enqueue_fn) {
     // Master Controller Rule: when a recipe is ongoing (auto_mode == true), G30 hardware is master.
     if (slot->state.boiler.auto_mode &&
-        (cmd->action == CMD_ACTION_SET_TIMER ||
-         cmd->action == CMD_ACTION_CANCEL_TIMER ||
-         cmd->action == CMD_ACTION_SET_TARGET_TEMP)) {
+        (cmd->action == G30_CMD_ACTION_SET_TIMER ||
+         cmd->action == G30_CMD_ACTION_CANCEL_TIMER ||
+         cmd->action == G30_CMD_ACTION_SET_TARGET_TEMP ||
+         cmd->action == G30_CMD_ACTION_TEMP_UP ||
+         cmd->action == G30_CMD_ACTION_TEMP_DOWN)) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    unified_command_t effective_cmd = *cmd;
-    if (effective_cmd.action == CMD_ACTION_ACK_INTERACTION &&
+    // The G30 only has a timer pause/resume TOGGLE (G); make pause/resume explicit.
+    if ((cmd->action == G30_CMD_ACTION_PAUSE_TIMER && slot->state.boiler.timer.paused) ||
+        (cmd->action == G30_CMD_ACTION_RESUME_TIMER && !slot->state.boiler.timer.paused)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    g30_command_t effective_cmd = *cmd;
+    if (effective_cmd.action == G30_CMD_ACTION_ACK_INTERACTION &&
         slot->state.boiler.interaction.code == 5) {
-        effective_cmd.action = CMD_ACTION_DISMISS_ALERT;
+        effective_cmd.action = G30_CMD_ACTION_DISMISS_ALERT;
     }
 
     ble_outbound_cmd_packet_t pkt;
@@ -206,7 +220,7 @@ static esp_err_t g30_drv_dispatch_command(equipment_slot_t *slot,
 
 static esp_err_t g30_drv_dispatch_recipe(equipment_slot_t *slot,
                                          const char *req_id,
-                                         const unified_recipe_t *recipe,
+                                         const g30_recipe_t *recipe,
                                          eq_enqueue_ble_pkt_fn_t enqueue_fn) {
     if (recipe == NULL || recipe->mash_step_count == 0 || recipe->mash_step_count > MAX_MASH_STEPS) {
         return ESP_ERR_INVALID_ARG;
@@ -309,7 +323,7 @@ static esp_err_t g30_drv_format_telemetry_json(const equipment_slot_t *slot,
              slot->mac[0], slot->mac[1], slot->mac[2],
              slot->mac[3], slot->mac[4], slot->mac[5]);
 
-    const unified_boiler_state_t *st = &slot->state.boiler;
+    const g30_state_t *st = &slot->state.boiler;
     const char *model_str = slot->model[0] ? slot->model : "Grainfather G30";
     const char *name_str = slot->name[0] ? slot->name : model_str;
     snprintf(out_json, max_len,
@@ -320,7 +334,7 @@ static esp_err_t g30_drv_format_telemetry_json(const equipment_slot_t *slot,
              "\"pump\":{\"active\":%s},"
              "\"timer\":{\"active\":%s,\"paused\":%s,\"remaining_seconds\":%lu,\"total_seconds\":%lu},"
              "\"stage\":{\"step_index\":%u,\"step_name\":\"%s\",\"auto_mode\":%s},"
-             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"}"
+             "\"interaction\":{\"required\":%s,\"code\":%u,\"message\":\"%s\"},\"flags\":{\"delayed_heat\":%s,\"interrupted\":%s,\"manual_power\":%s,\"sparge_alert\":%s},\"error_code\":%u"
              "},\"timestamp_ms\":%lu}",
              mac_str, name_str, model_str,
              slot->rssi,
@@ -339,6 +353,11 @@ static esp_err_t g30_drv_format_telemetry_json(const equipment_slot_t *slot,
              st->interaction.required ? "true" : "false",
              st->interaction.code,
              st->interaction.message,
+             st->delayed_heat ? "true" : "false",
+             st->interrupted ? "true" : "false",
+             st->manual_power ? "true" : "false",
+             st->sparge_alert ? "true" : "false",
+             st->error_code,
              (unsigned long)timestamp_ms);
     return ESP_OK;
 }
@@ -347,8 +366,8 @@ static esp_err_t g30_drv_format_telemetry_json(const equipment_slot_t *slot,
 // Driver 2: Extensible Fermenter Driver (EQUIPMENT_TYPE_FERMENTER)
 // =============================================================================
 static void ferm_drv_init_state(equipment_slot_t *slot) {
-    memset(&slot->state.fermenter, 0, sizeof(unified_fermenter_state_t));
-    memset(&slot->prev_state.fermenter, 0, sizeof(unified_fermenter_state_t));
+    memset(&slot->state.fermenter, 0, sizeof(placeholder_fermenter_state_t));
+    memset(&slot->prev_state.fermenter, 0, sizeof(placeholder_fermenter_state_t));
     slot->state.fermenter.target_temp_c = 20.0f;
     slot->state.fermenter.gravity_sg = 1.050f;
 }
@@ -370,9 +389,9 @@ static esp_err_t ferm_drv_parse_notification(equipment_slot_t *slot, const uint8
 }
 
 static esp_err_t ferm_drv_dispatch_command(equipment_slot_t *slot,
-                                           const unified_command_t *cmd,
+                                           const g30_command_t *cmd,
                                            eq_enqueue_ble_pkt_fn_t enqueue_fn) {
-    if (cmd->action == CMD_ACTION_SET_TARGET_TEMP) {
+    if (cmd->action == G30_CMD_ACTION_SET_TARGET_TEMP) {
         slot->state.fermenter.target_temp_c = cmd->params.target_temp_c;
         ble_outbound_cmd_packet_t pkt;
         memset(&pkt, 0, sizeof(pkt));
@@ -392,7 +411,7 @@ static esp_err_t ferm_drv_dispatch_command(equipment_slot_t *slot,
 
 static esp_err_t ferm_drv_dispatch_recipe(equipment_slot_t *slot,
                                           const char *req_id,
-                                          const unified_recipe_t *recipe,
+                                          const g30_recipe_t *recipe,
                                           eq_enqueue_ble_pkt_fn_t enqueue_fn) {
     if (recipe == NULL || recipe->fermentation_step_count == 0 ||
         recipe->fermentation_step_count > MAX_FERMENTATION_STEPS) {
@@ -435,7 +454,7 @@ static esp_err_t ferm_drv_format_telemetry_json(const equipment_slot_t *slot,
              slot->mac[0], slot->mac[1], slot->mac[2],
              slot->mac[3], slot->mac[4], slot->mac[5]);
 
-    const unified_fermenter_state_t *st = &slot->state.fermenter;
+    const placeholder_fermenter_state_t *st = &slot->state.fermenter;
     const char *model_str = slot->model[0] ? slot->model : "BrewLink Fermenter";
     const char *name_str = slot->name[0] ? slot->name : model_str;
     snprintf(out_json, max_len,
@@ -458,8 +477,8 @@ static esp_err_t ferm_drv_format_telemetry_json(const equipment_slot_t *slot,
 // Driver 3: Extensible Cooler / Heater Driver (EQUIPMENT_TYPE_COOLER_HEATER)
 // =============================================================================
 static void cooler_drv_init_state(equipment_slot_t *slot) {
-    memset(&slot->state.cooler, 0, sizeof(unified_cooler_heater_state_t));
-    memset(&slot->prev_state.cooler, 0, sizeof(unified_cooler_heater_state_t));
+    memset(&slot->state.cooler, 0, sizeof(placeholder_cooler_state_t));
+    memset(&slot->prev_state.cooler, 0, sizeof(placeholder_cooler_state_t));
     slot->state.cooler.active_zones_count = 1;
     slot->state.cooler.zones[0].target_temp_c = 4.0f;
 }
@@ -481,9 +500,9 @@ static esp_err_t cooler_drv_parse_notification(equipment_slot_t *slot, const uin
 }
 
 static esp_err_t cooler_drv_dispatch_command(equipment_slot_t *slot,
-                                             const unified_command_t *cmd,
+                                             const g30_command_t *cmd,
                                              eq_enqueue_ble_pkt_fn_t enqueue_fn) {
-    if (cmd->action == CMD_ACTION_SET_TARGET_TEMP) {
+    if (cmd->action == G30_CMD_ACTION_SET_TARGET_TEMP) {
         slot->state.cooler.zones[0].target_temp_c = cmd->params.target_temp_c;
         ble_outbound_cmd_packet_t pkt;
         memset(&pkt, 0, sizeof(pkt));
@@ -503,7 +522,7 @@ static esp_err_t cooler_drv_dispatch_command(equipment_slot_t *slot,
 
 static esp_err_t cooler_drv_dispatch_recipe(equipment_slot_t *slot,
                                             const char *req_id,
-                                            const unified_recipe_t *recipe,
+                                            const g30_recipe_t *recipe,
                                             eq_enqueue_ble_pkt_fn_t enqueue_fn) {
     if (recipe == NULL || recipe->fermentation_step_count == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -532,7 +551,7 @@ static esp_err_t cooler_drv_format_telemetry_json(const equipment_slot_t *slot,
              slot->mac[0], slot->mac[1], slot->mac[2],
              slot->mac[3], slot->mac[4], slot->mac[5]);
 
-    const unified_cooler_heater_state_t *st = &slot->state.cooler;
+    const placeholder_cooler_state_t *st = &slot->state.cooler;
     const char *model_str = slot->model[0] ? slot->model : "BrewLink Chiller";
     const char *name_str = slot->name[0] ? slot->name : model_str;
     snprintf(out_json, max_len,
@@ -852,8 +871,8 @@ esp_err_t equipment_manager_process_notification(const uint8_t mac[6],
     if (err == ESP_OK) {
         bool should_pub = true;
         if (slot->equipment_type == EQUIPMENT_TYPE_BOILER) {
-            const unified_boiler_state_t *cur = &slot->state.boiler;
-            const unified_boiler_state_t *prv = &slot->prev_state.boiler;
+            const g30_state_t *cur = &slot->state.boiler;
+            const g30_state_t *prv = &slot->prev_state.boiler;
             bool discrete_changed = (cur->pump_active != prv->pump_active) ||
                                     (cur->heat_active != prv->heat_active) ||
                                     (cur->heat_power_pct != prv->heat_power_pct) ||
@@ -886,7 +905,7 @@ esp_err_t equipment_manager_process_notification(const uint8_t mac[6],
     return err;
 }
 
-esp_err_t equipment_manager_dispatch_command(const unified_command_t *cmd, uint8_t out_resolved_mac[6]) {
+esp_err_t equipment_manager_dispatch_command(const g30_command_t *cmd, uint8_t out_resolved_mac[6]) {
     if (cmd == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -913,7 +932,7 @@ esp_err_t equipment_manager_dispatch_recipe_ex(uint8_t target_slot,
                                                const uint8_t target_mac[6],
                                                equipment_type_t target_type,
                                                const char *req_id,
-                                               const unified_recipe_t *recipe,
+                                               const g30_recipe_t *recipe,
                                                uint8_t out_resolved_mac[6]) {
     if (recipe == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -940,7 +959,7 @@ esp_err_t equipment_manager_dispatch_recipe_to_slot(uint8_t target_slot,
                                                     const uint8_t target_mac[6],
                                                     equipment_type_t target_type,
                                                     const char *req_id,
-                                                    const unified_recipe_t *recipe,
+                                                    const g30_recipe_t *recipe,
                                                     uint8_t out_resolved_mac[6]) {
     return equipment_manager_dispatch_recipe_ex(target_slot, NULL, target_mac, target_type, req_id, recipe, out_resolved_mac);
 }
@@ -948,7 +967,7 @@ esp_err_t equipment_manager_dispatch_recipe_to_slot(uint8_t target_slot,
 esp_err_t equipment_manager_dispatch_recipe(const uint8_t target_mac[6],
                                             equipment_type_t target_type,
                                             const char *req_id,
-                                            const unified_recipe_t *recipe,
+                                            const g30_recipe_t *recipe,
                                             uint8_t out_resolved_mac[6]) {
     return equipment_manager_dispatch_recipe_ex(0, NULL, target_mac, target_type, req_id, recipe, out_resolved_mac);
 }

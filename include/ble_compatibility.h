@@ -27,7 +27,7 @@ typedef int esp_err_t;
 #endif
 #endif
 
-#include "unified_schema.h"
+#include "g30_schema.h"
 
 #ifdef __cplusplus
 extern "C" {
