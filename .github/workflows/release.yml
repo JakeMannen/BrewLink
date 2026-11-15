@@ -245,6 +245,8 @@ jobs:
 
       - name: Build ESP32 Firmware (workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
+        env:
+          BREWLINK_VERSION: ${{ needs.version.outputs.version }}
         run: |
           pio run -e esp32dev
 
@@ -279,6 +281,39 @@ jobs:
           cp "${BUILD_DIR}/partitions.bin" "${OUT_DIR}/${PREFIX}-partitions.bin"
           cp "${BUILD_DIR}/firmware.elf"   "${OUT_DIR}/${PREFIX}-firmware.elf"
 
+          # Stamp release version into esp_app_desc_t and update checksum + SHA-256
+          python3 - "${OUT_DIR}/${PREFIX}-firmware.bin" "${VERSION}" <<'PYEOF'
+          import hashlib, struct, sys
+          path, ver = sys.argv[1], sys.argv[2].lstrip("v")
+          data = bytearray(open(path, "rb").read())
+          if len(data) < 288 or data[0] != 0xE9:
+              raise SystemExit(f"Invalid ESP-IDF firmware image header in {path}")
+          magic_word = struct.unpack_from("<I", data, 32)[0]
+          if magic_word != 0xABCD5432:
+              raise SystemExit(f"Unexpected esp_app_desc_t magic word: 0x{magic_word:08x}")
+          ver_bytes = ver.encode("utf-8")[:31]
+          data[48:80] = ver_bytes + b"\x00" * (32 - len(ver_bytes))
+          seg_count = data[1]
+          hash_appended = data[23]
+          pos = 24
+          xor_sum = 0xEF
+          for _ in range(seg_count):
+              _load_addr, seg_len = struct.unpack_from("<II", data, pos)
+              pos += 8
+              for b in data[pos:pos + seg_len]:
+                  xor_sum ^= b
+              pos += seg_len
+          checksum_idx = ((pos + 16) & ~15) - 1
+          data[checksum_idx] = xor_sum
+          if hash_appended == 1:
+              img_end = checksum_idx + 1
+              digest = hashlib.sha256(data[:img_end]).digest()
+              data[img_end:img_end + 32] = digest
+          with open(path, "wb") as fh:
+              fh.write(data)
+          print(f"Stamped esp_app_desc_t.version='{ver}' and recomputed checksum/SHA-256 for {path}")
+          PYEOF
+
           # Create merged full-flash factory image (flashable at 0x0)
           python -m esptool --chip esp32 merge-bin \
             -o "${OUT_DIR}/${PREFIX}-factory.bin" \
@@ -287,7 +322,7 @@ jobs:
             --flash-size 4MB \
             0x1000 "${BUILD_DIR}/bootloader.bin" \
             0x8000 "${BUILD_DIR}/partitions.bin" \
-            0x10000 "${BUILD_DIR}/firmware.bin" || \
+            0x10000 "${OUT_DIR}/${PREFIX}-firmware.bin" || \
           python -m esptool --chip esp32 merge_bin \
             -o "${OUT_DIR}/${PREFIX}-factory.bin" \
             --flash_mode dio \
@@ -295,7 +330,7 @@ jobs:
             --flash_size 4MB \
             0x1000 "${BUILD_DIR}/bootloader.bin" \
             0x8000 "${BUILD_DIR}/partitions.bin" \
-            0x10000 "${BUILD_DIR}/firmware.bin"
+            0x10000 "${OUT_DIR}/${PREFIX}-firmware.bin"
 
           # Create complete release bundle zip
           (

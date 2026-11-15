@@ -21,6 +21,7 @@
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "ble_manager.h"
+#include "ota_manager.h"
 #include "grainfather_g30.h"
 #include "g30_controller.h"
 #include "web_page.h"
@@ -322,6 +323,8 @@ static esp_err_t api_status_get_handler(httpd_req_t *req) {
     cJSON_AddNumberToObject(sys, "uptime_s", (double)(esp_timer_get_time() / 1000000ULL));
     cJSON_AddNumberToObject(sys, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(sys, "min_free_heap", esp_get_minimum_free_heap_size());
+    cJSON_AddStringToObject(sys, "firmware_version", ota_manager_get_current_version());
+    cJSON_AddStringToObject(sys, "running_partition", ota_manager_get_running_partition());
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1552,6 +1555,294 @@ static esp_err_t api_system_restart_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// =============================================================================
+// Firmware OTA Handlers (/api/ota/*)
+// =============================================================================
+
+static cJSON *ota_status_to_json(const ota_status_t *st, const char *status_str) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return NULL;
+    }
+    if (status_str) {
+        cJSON_AddStringToObject(root, "status", status_str);
+    }
+    cJSON_AddStringToObject(root, "current_version", st->current_version);
+    cJSON_AddStringToObject(root, "running_partition", st->running_partition);
+    cJSON_AddStringToObject(root, "target_partition", st->target_partition);
+    cJSON_AddStringToObject(root, "state", ota_state_to_str(st->state));
+    cJSON_AddNumberToObject(root, "progress_pct", st->progress_pct);
+    cJSON_AddNumberToObject(root, "bytes_written", (double)st->bytes_written);
+    cJSON_AddNumberToObject(root, "total_bytes", (double)st->total_bytes);
+    cJSON_AddStringToObject(root, "message", st->message);
+    cJSON_AddStringToObject(root, "last_error", st->last_error);
+    cJSON_AddNumberToObject(root, "last_check_time_s", (double)st->last_check_time_s);
+
+    cJSON *rel = cJSON_AddObjectToObject(root, "latest_release");
+    cJSON_AddBoolToObject(rel, "available", st->latest_release.available);
+    cJSON_AddBoolToObject(rel, "update_available", st->latest_release.update_available);
+    cJSON_AddBoolToObject(rel, "prerelease", st->latest_release.prerelease);
+    cJSON_AddStringToObject(rel, "tag_name", st->latest_release.tag_name);
+    cJSON_AddStringToObject(rel, "version", st->latest_release.version);
+    cJSON_AddStringToObject(rel, "release_name", st->latest_release.release_name);
+    cJSON_AddStringToObject(rel, "published_at", st->latest_release.published_at);
+    cJSON_AddStringToObject(rel, "html_url", st->latest_release.html_url);
+    cJSON_AddStringToObject(rel, "asset_name", st->latest_release.asset_name);
+    cJSON_AddStringToObject(rel, "download_url", st->latest_release.download_url);
+    cJSON_AddNumberToObject(rel, "asset_size", (double)st->latest_release.asset_size);
+    cJSON_AddStringToObject(rel, "notes", st->latest_release.notes);
+    return root;
+}
+
+static esp_err_t send_json_response(httpd_req_t *req, const char *http_status, cJSON *root) {
+    char *json_str = root ? cJSON_PrintUnformatted(root) : NULL;
+    if (root) {
+        cJSON_Delete(root);
+    }
+    if (!json_str) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    if (http_status) {
+        httpd_resp_set_status(req, http_status);
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+    free(json_str);
+    return ret;
+}
+
+// GET /api/ota/status
+static esp_err_t api_ota_status_get_handler(httpd_req_t *req) {
+    ota_status_t st;
+    ota_manager_get_status(&st);
+    return send_json_response(req, "200 OK", ota_status_to_json(&st, "ok"));
+}
+
+// POST /api/ota/check - Query GitHub Releases for latest version
+static esp_err_t api_ota_check_post_handler(httpd_req_t *req) {
+    char custom_url[OTA_URL_MAX_LEN] = {0};
+
+    if (req->content_len > 0 && req->content_len < (int)sizeof(custom_url)) {
+        char body[512] = {0};
+        int to_read = (req->content_len < (int)sizeof(body) - 1) ? req->content_len : (int)sizeof(body) - 1;
+        int r = httpd_req_recv(req, body, to_read);
+        if (r > 0) {
+            body[r] = '\0';
+            cJSON *json = cJSON_Parse(body);
+            if (json) {
+                cJSON *u = cJSON_GetObjectItem(json, "releases_url");
+                if (u && cJSON_IsString(u) && u->valuestring) {
+                    snprintf(custom_url, sizeof(custom_url), "%s", u->valuestring);
+                }
+                cJSON_Delete(json);
+            }
+        }
+    }
+
+    ota_release_info_t rel;
+    esp_err_t err = ota_manager_check_github_release(custom_url[0] ? custom_url : NULL, &rel);
+
+    ota_status_t st;
+    ota_manager_get_status(&st);
+    if (err != ESP_OK) {
+        cJSON *resp = ota_status_to_json(&st, "error");
+        if (resp) {
+            cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : esp_err_to_name(err));
+        }
+        return send_json_response(req, "502 Bad Gateway", resp);
+    }
+
+    return send_json_response(req, "200 OK", ota_status_to_json(&st, "ok"));
+}
+
+// POST /api/ota/update - Start remote HTTPS OTA update from download_url or cached release
+static esp_err_t api_ota_update_post_handler(httpd_req_t *req) {
+    char download_url[OTA_URL_MAX_LEN] = {0};
+
+    if (req->content_len > 0) {
+        if (req->content_len > 1024) {
+            httpd_resp_set_hdr(req, "Connection", "close");
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Request body too large\"}", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL;
+        }
+        char body[1025] = {0};
+        int received = 0;
+        while (received < req->content_len) {
+            int r = httpd_req_recv(req, body + received, req->content_len - received);
+            if (r <= 0) {
+                if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                    continue;
+                }
+                httpd_resp_set_status(req, "400 Bad Request");
+                httpd_resp_set_type(req, "application/json");
+                httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Incomplete JSON payload\"}", HTTPD_RESP_USE_STRLEN);
+                return ESP_FAIL;
+            }
+            received += r;
+        }
+        body[received] = '\0';
+        cJSON *json = cJSON_Parse(body);
+        if (json) {
+            cJSON *u = cJSON_GetObjectItem(json, "download_url");
+            if (u && cJSON_IsString(u) && u->valuestring) {
+                snprintf(download_url, sizeof(download_url), "%s", u->valuestring);
+            }
+            cJSON_Delete(json);
+        }
+    }
+
+    if (download_url[0] == '\0') {
+        ota_status_t st;
+        ota_manager_get_status(&st);
+        if (st.latest_release.download_url[0] != '\0') {
+            snprintf(download_url, sizeof(download_url), "%s", st.latest_release.download_url);
+        }
+    }
+
+    if (download_url[0] == '\0') {
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "status", "error");
+        cJSON_AddStringToObject(resp, "error", "No firmware release download URL available; run release check first");
+        return send_json_response(req, "400 Bad Request", resp);
+    }
+
+    esp_err_t err = ota_manager_start_remote_update(download_url);
+    ota_status_t st;
+    ota_manager_get_status(&st);
+
+    if (err == ESP_ERR_INVALID_STATE) {
+        cJSON *resp = ota_status_to_json(&st, "error");
+        if (resp) cJSON_AddStringToObject(resp, "error", "An OTA update is already in progress");
+        return send_json_response(req, "409 Conflict", resp);
+    }
+    if (err != ESP_OK) {
+        cJSON *resp = ota_status_to_json(&st, "error");
+        if (resp) cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : esp_err_to_name(err));
+        return send_json_response(req, "400 Bad Request", resp);
+    }
+
+    return send_json_response(req, "200 OK", ota_status_to_json(&st, "ok"));
+}
+
+// POST /api/ota/upload - Stream manual firmware binary (-firmware.bin or -factory.bin)
+static esp_err_t api_ota_upload_post_handler(httpd_req_t *req) {
+    if (req->content_len < (int)OTA_MIN_IMAGE_HEADER_SIZE ||
+        req->content_len > (int)(OTA_FACTORY_APP_OFFSET + OTA_MAX_IMAGE_SIZE + 65536U)) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+        cJSON *resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "status", "error");
+        cJSON_AddStringToObject(resp, "error", "Invalid firmware upload size");
+        send_json_response(req, "400 Bad Request", resp);
+        return (req->content_len > 0) ? ESP_FAIL : ESP_OK;
+    }
+
+    bool schedule_reboot = true;
+    char query[64] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[8] = {0};
+        if (httpd_query_key_value(query, "reboot", val, sizeof(val)) == ESP_OK && strcmp(val, "0") == 0) {
+            schedule_reboot = false;
+        }
+    }
+
+    const size_t BUF_SZ = 4096U;
+    uint8_t *buf = (uint8_t *)malloc(BUF_SZ);
+    if (!buf) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Out of heap allocating upload buffer\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
+    size_t remaining = (size_t)req->content_len;
+    size_t total_len = remaining;
+    bool started = false;
+    ota_image_info_t img_info;
+    memset(&img_info, 0, sizeof(img_info));
+    int timeouts = 0;
+
+    while (remaining > 0) {
+        size_t want = (remaining > BUF_SZ) ? BUF_SZ : remaining;
+        size_t chunk_len = 0;
+
+        // On first chunk, gather at least 512 bytes (if available) for immediate header validation
+        do {
+            int r = httpd_req_recv(req, (char *)(buf + chunk_len), want - chunk_len);
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                timeouts++;
+                if (timeouts > 8) {
+                    free(buf);
+                    ota_manager_abort_upload("Upload timed out waiting for data");
+                    httpd_resp_set_hdr(req, "Connection", "close");
+                    httpd_resp_set_status(req, "408 Request Timeout");
+                    httpd_resp_set_type(req, "application/json");
+                    httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Upload timed out\"}", HTTPD_RESP_USE_STRLEN);
+                    return ESP_FAIL;
+                }
+                continue;
+            }
+            if (r <= 0) {
+                free(buf);
+                ota_manager_abort_upload("Client disconnected before upload completed");
+                return ESP_FAIL;
+            }
+            timeouts = 0;
+            chunk_len += (size_t)r;
+            remaining -= (size_t)r;
+        } while (!started && chunk_len < 512U && remaining > 0 && chunk_len < want);
+
+        esp_err_t err;
+        if (!started) {
+            err = ota_manager_begin_upload(total_len, buf, chunk_len, &img_info);
+            started = true;
+        } else {
+            err = ota_manager_write_upload_chunk(buf, chunk_len);
+        }
+
+        if (err != ESP_OK) {
+            free(buf);
+            ota_status_t st;
+            ota_manager_get_status(&st);
+            if (remaining > 0) {
+                httpd_resp_set_hdr(req, "Connection", "close");
+            }
+            cJSON *resp = ota_status_to_json(&st, "error");
+            if (resp) {
+                cJSON_AddStringToObject(resp, "detected_format", ota_file_format_to_str(img_info.format));
+                cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : "Firmware format verification failed");
+            }
+            send_json_response(req, "400 Bad Request", resp);
+            return (remaining > 0) ? ESP_FAIL : ESP_OK;
+        }
+    }
+
+    free(buf);
+
+    esp_err_t ferr = ota_manager_finish_upload(schedule_reboot);
+    ota_status_t st;
+    ota_manager_get_status(&st);
+    if (ferr != ESP_OK) {
+        cJSON *resp = ota_status_to_json(&st, "error");
+        if (resp) {
+            cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : "Firmware integrity check failed");
+        }
+        return send_json_response(req, "400 Bad Request", resp);
+    }
+
+    cJSON *resp = ota_status_to_json(&st, "ok");
+    if (resp) {
+        cJSON_AddStringToObject(resp, "uploaded_version", img_info.version);
+        cJSON_AddStringToObject(resp, "detected_format", ota_file_format_to_str(img_info.format));
+        cJSON_AddBoolToObject(resp, "rebooting", schedule_reboot);
+    }
+    return send_json_response(req, "200 OK", resp);
+}
+
 // -----------------------------------------------------------------------------
 // Web Server Lifecycle
 // -----------------------------------------------------------------------------
@@ -1564,7 +1855,7 @@ esp_err_t web_server_start(void) {
     config.server_port = WEB_SERVER_PORT;
     config.core_id = NETWORKING_TASK_CORE;
     config.stack_size = WEB_SERVER_STACK_SIZE;
-    config.max_uri_handlers = 36;
+    config.max_uri_handlers = 40;
     config.lru_purge_enable = true;
 
     ESP_LOGI(TAG, "Starting HTTP & WebSocket server on port %d...", config.server_port);
@@ -1630,6 +1921,19 @@ esp_err_t web_server_start(void) {
 
     httpd_uri_t uri_sys_restart = {.uri = "/api/system/restart", .method = HTTP_POST, .handler = api_system_restart_post_handler};
     httpd_register_uri_handler(s_server, &uri_sys_restart);
+
+    // Firmware OTA Endpoints
+    httpd_uri_t uri_ota_status = {.uri = "/api/ota/status", .method = HTTP_GET, .handler = api_ota_status_get_handler};
+    httpd_register_uri_handler(s_server, &uri_ota_status);
+
+    httpd_uri_t uri_ota_check = {.uri = "/api/ota/check", .method = HTTP_POST, .handler = api_ota_check_post_handler};
+    httpd_register_uri_handler(s_server, &uri_ota_check);
+
+    httpd_uri_t uri_ota_update = {.uri = "/api/ota/update", .method = HTTP_POST, .handler = api_ota_update_post_handler};
+    httpd_register_uri_handler(s_server, &uri_ota_update);
+
+    httpd_uri_t uri_ota_upload = {.uri = "/api/ota/upload", .method = HTTP_POST, .handler = api_ota_upload_post_handler};
+    httpd_register_uri_handler(s_server, &uri_ota_upload);
 
     // Pairing Endpoints
     httpd_uri_t uri_pair_status = {.uri = "/api/pair/status", .method = HTTP_GET, .handler = api_pair_status_get_handler};
