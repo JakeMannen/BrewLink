@@ -9,6 +9,7 @@ idf_component_register(
         "wifi_manager.c"
         "mqtt_manager.c"
         "ble_manager.c"
+        "ota_manager.c"
         "web_server.c"
     INCLUDE_DIRS 
         "."
@@ -27,4 +28,7 @@ idf_component_register(
         cjson
         driver
         esp_timer
+        app_update
+        esp_app_format
+        mbedtls
 )

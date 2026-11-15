@@ -29,6 +29,7 @@
 #include "config_store.h"
 #include "auth_manager.h"
 #include "equipment_manager.h"
+#include "ota_manager.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "ble_manager.h"
@@ -636,11 +637,12 @@ static void on_mqtt_connection_status_change(bool connected) {
 
         char status_json[320];
         snprintf(status_json, sizeof(status_json),
-                 "{\"status\":\"online\",\"gateway_id\":\"%s\",\"firmware\":\"1.0.0\","
+                 "{\"status\":\"online\",\"gateway_id\":\"%s\",\"firmware\":\"%s\","
                  "\"hardware\":\"ESP-WROOM-32\",\"framework\":\"ESP-IDF v6.1\","
                  "\"ip_address\":\"%s\",\"rssi\":%d,\"max_slots\":%d,"
                  "\"active_peripherals\":%d,\"timestamp_ms\":%lu}",
-                 s_gateway_id, wifi_stat.sta_ip, wifi_stat.sta_rssi,
+                 s_gateway_id, ota_manager_get_current_version(),
+                 wifi_stat.sta_ip, wifi_stat.sta_rssi,
                  BLE_MAX_SIMULTANEOUS_CONNECTIONS,
                  ble_manager_get_connected_count(),
                  (unsigned long)esp_log_timestamp());
@@ -867,8 +869,9 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // 2. Initialize Persistent Configuration Store & Security / Pairing Manager
+    // 2. Initialize Persistent Configuration Store, OTA & Security / Pairing Manager
     ESP_ERROR_CHECK(config_store_init());
+    ESP_ERROR_CHECK(ota_manager_init());
     ESP_ERROR_CHECK(auth_manager_init());
 
     // 3. Derive Gateway Hardware ID

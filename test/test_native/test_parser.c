@@ -16,6 +16,8 @@
 #include "../../src/equipment_manager.c"
 #include "wifi_manager.h"
 #include "../../src/wifi_manager.c"
+#include "ota_manager.h"
+#include "../../src/ota_manager.c"
 
 void setUp(void) {
     // Set up before each test
@@ -1383,6 +1385,226 @@ void test_equipment_manager_unique_names_and_power_cycle_persistence(void) {
 }
 
 // =============================================================================
+// Firmware OTA Verification, SemVer & Release JSON Tests
+// =============================================================================
+
+static size_t build_synthetic_esp32_image(uint8_t *buf, size_t buf_cap,
+                                          const char *version, const char *project_name,
+                                          uint16_t chip_id, bool append_hash) {
+    const size_t seg_len = 256U;
+    const size_t raw_end = 24U + 8U + seg_len; // 288
+    const size_t checksum_idx = ((raw_end + 16U) & ~(size_t)15U) - 1U; // 303
+    const size_t img_end = checksum_idx + 1U; // 304
+    const size_t total_len = img_end + (append_hash ? 32U : 0U);
+    if (buf_cap < total_len) {
+        return 0;
+    }
+
+    memset(buf, 0, total_len);
+    buf[0] = OTA_ESP_IMAGE_MAGIC;
+    buf[1] = 1U; // 1 segment
+    buf[12] = (uint8_t)(chip_id & 0xFFU);
+    buf[13] = (uint8_t)((chip_id >> 8) & 0xFFU);
+    buf[23] = append_hash ? 1U : 0U;
+
+    // Segment 0 header (load_addr = 0x3F400020, data_len = 256)
+    buf[24] = 0x20U; buf[25] = 0x00U; buf[26] = 0x40U; buf[27] = 0x3FU;
+    buf[28] = (uint8_t)(seg_len & 0xFFU);
+    buf[29] = (uint8_t)((seg_len >> 8) & 0xFFU);
+
+    // esp_app_desc_t at offset 32 (magic 0xABCD5432 LE)
+    buf[32] = 0x32U; buf[33] = 0x54U; buf[34] = 0xCDU; buf[35] = 0xABU;
+    if (version) {
+        strncpy((char *)(buf + 48), version, 31);
+    }
+    if (project_name) {
+        strncpy((char *)(buf + 80), project_name, 31);
+    }
+    strncpy((char *)(buf + 112), "12:34:56", 15);
+    strncpy((char *)(buf + 128), "Nov 14 2026", 15);
+    strncpy((char *)(buf + 144), "6.1.0", 31);
+
+    uint8_t xor_sum = 0xEFU;
+    for (size_t i = 32; i < 32 + seg_len; i++) {
+        xor_sum ^= buf[i];
+    }
+    buf[checksum_idx] = xor_sum;
+
+    if (append_hash) {
+        ota_compute_sha256(buf, img_end, buf + img_end);
+    }
+    return total_len;
+}
+
+void test_ota_semver_comparison_and_prereleases(void) {
+    char norm[OTA_VERSION_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_normalize_version(" v0.2.0 \n", norm, sizeof(norm)));
+    TEST_ASSERT_EQUAL_STRING("0.2.0", norm);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, ota_normalize_version("invalid", norm, sizeof(norm)));
+
+    TEST_ASSERT_EQUAL_INT(0, ota_compare_versions("v0.2.0", "0.2.0"));
+    TEST_ASSERT_EQUAL_INT(0, ota_compare_versions("0.2.0+build99", "0.2.0"));
+    TEST_ASSERT_EQUAL_INT(-1, ota_compare_versions("0.2.0", "0.2.1"));
+    TEST_ASSERT_EQUAL_INT(1, ota_compare_versions("0.2.10", "0.2.2"));
+    TEST_ASSERT_EQUAL_INT(-1, ota_compare_versions("0.3.0-alpha.1", "0.3.0-beta.2"));
+    TEST_ASSERT_EQUAL_INT(-1, ota_compare_versions("0.3.0-rc.2", "0.3.0-rc.10"));
+    TEST_ASSERT_EQUAL_INT(-1, ota_compare_versions("0.3.0-rc.1", "0.3.0"));
+    TEST_ASSERT_TRUE(ota_is_newer_version("v0.3.0", "0.2.0"));
+    TEST_ASSERT_FALSE(ota_is_newer_version("v0.2.0", "0.2.0"));
+    TEST_ASSERT_FALSE(ota_is_newer_version("0.3.0-rc.1", "0.3.0"));
+}
+
+void test_ota_verify_valid_firmware_bin_header_and_integrity(void) {
+    uint8_t img[512];
+    size_t img_len = build_synthetic_esp32_image(img, sizeof(img), "0.2.5", "BrewLink",
+                                                 OTA_CHIP_ID_ESP32, true);
+    TEST_ASSERT_GREATER_OR_EQUAL(OTA_MIN_IMAGE_HEADER_SIZE + 32U, img_len);
+
+    ota_image_info_t info;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_verify_full_image_integrity(img, img_len, &info));
+    TEST_ASSERT_TRUE(info.valid);
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_FIRMWARE_BIN, info.format);
+    TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)info.app_offset);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)img_len, (uint32_t)info.app_size);
+    TEST_ASSERT_EQUAL_STRING("0.2.5", info.version);
+    TEST_ASSERT_EQUAL_STRING("BrewLink", info.project_name);
+    TEST_ASSERT_EQUAL_STRING("6.1.0", info.idf_ver);
+
+    // Corrupt a payload byte inside esp_app_desc_t time field -> XOR checksum mismatch
+    img[115] ^= 0x01U;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_RESPONSE, ota_verify_full_image_integrity(img, img_len, &info));
+    TEST_ASSERT_FALSE(info.valid);
+
+    // Fix XOR checksum while leaving SHA-256 stale -> trailing SHA-256 mismatch
+    img[303] ^= 0x01U;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_RESPONSE, ota_verify_full_image_integrity(img, img_len, &info));
+    TEST_ASSERT_FALSE(info.valid);
+}
+
+void test_ota_verify_merged_factory_bin_extraction(void) {
+    const size_t cap = OTA_FACTORY_APP_OFFSET + 512U;
+    uint8_t *factory_img = (uint8_t *)malloc(cap);
+    TEST_ASSERT_NOT_NULL(factory_img);
+    memset(factory_img, 0xFF, cap);
+
+    // Stamp realistic factory markers (bootloader @ 0x1000, partitions @ 0x8000)
+    factory_img[OTA_FACTORY_BOOTLOADER_OFF] = OTA_ESP_IMAGE_MAGIC;
+    factory_img[OTA_FACTORY_PARTITIONS_OFF] = 0xAAU;
+    factory_img[OTA_FACTORY_PARTITIONS_OFF + 1] = 0x50U;
+
+    size_t app_len = build_synthetic_esp32_image(factory_img + OTA_FACTORY_APP_OFFSET, 512U,
+                                                 "0.3.0", "BrewLink", OTA_CHIP_ID_ESP32, true);
+    TEST_ASSERT_GREATER_THAN(OTA_MIN_IMAGE_HEADER_SIZE, app_len);
+
+    ota_image_info_t info;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_verify_full_image_integrity(
+        factory_img, OTA_FACTORY_APP_OFFSET + app_len, &info));
+    TEST_ASSERT_TRUE(info.valid);
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_FACTORY_BIN, info.format);
+    TEST_ASSERT_EQUAL_UINT32(OTA_FACTORY_APP_OFFSET, (uint32_t)info.app_offset);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)app_len, (uint32_t)info.app_size);
+    TEST_ASSERT_EQUAL_STRING("0.3.0", info.version);
+
+    free(factory_img);
+}
+
+void test_ota_rejects_invalid_and_wrong_release_files(void) {
+    ota_image_info_t info;
+
+    // 1. ELF executable (-firmware.elf)
+    const uint8_t elf_buf[64] = {0x7F, 'E', 'L', 'F', 0x01, 0x01};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(elf_buf, sizeof(elf_buf), &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_ELF, info.format);
+    TEST_ASSERT_FALSE(info.valid);
+
+    // 2. ZIP release bundle (.zip)
+    const uint8_t zip_buf[64] = {'P', 'K', 0x03, 0x04, 0x14, 0x00};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(zip_buf, sizeof(zip_buf), &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_ZIP, info.format);
+
+    // 3. Partition table binary (-partitions.bin)
+    uint8_t part_buf[64];
+    memset(part_buf, 0, sizeof(part_buf));
+    part_buf[0] = 0xAAU;
+    part_buf[1] = 0x50U;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(part_buf, sizeof(part_buf), &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_PARTITIONS_BIN, info.format);
+
+    // 4. Bootloader binary (-bootloader.bin: 0xE9 magic at 0, no esp_app_desc magic at offset 32)
+    uint8_t boot_buf[OTA_MIN_IMAGE_HEADER_SIZE];
+    memset(boot_buf, 0, sizeof(boot_buf));
+    boot_buf[0] = OTA_ESP_IMAGE_MAGIC;
+    boot_buf[1] = 2U;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(boot_buf, sizeof(boot_buf), &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_BOOTLOADER_BIN, info.format);
+
+    // 5. Foreign ESP32 application binary (wrong project_name)
+    uint8_t foreign_img[512];
+    size_t flen = build_synthetic_esp32_image(foreign_img, sizeof(foreign_img), "1.0.0", "OtherApp",
+                                              OTA_CHIP_ID_ESP32, true);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(foreign_img, flen, &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_OTHER_ESP_IMAGE, info.format);
+
+    // 6. Wrong chip target (ESP32-S3 chip_id = 0x0009)
+    flen = build_synthetic_esp32_image(foreign_img, sizeof(foreign_img), "0.3.0", "BrewLink", 0x0009U, true);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(foreign_img, flen, &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_OTHER_ESP_IMAGE, info.format);
+
+    // 7. Random / unknown binary
+    const uint8_t garbage[64] = {0x12, 0x34, 0x56, 0x78};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, ota_verify_firmware_header(garbage, sizeof(garbage), &info));
+    TEST_ASSERT_EQUAL_INT(OTA_FORMAT_UNKNOWN, info.format);
+}
+
+void test_ota_parse_github_release_json(void) {
+    const char *release_json =
+        "{"
+        "\"url\":\"https://api.github.com/repos/JakeMannen/BrewLink/releases/1\","
+        "\"author\":{\"login\":\"JakeMannen\",\"name\":\"Should Not Override Release Name\"},"
+        "\"tag_name\":\"v0.3.0\","
+        "\"name\":\"BrewLink v0.3.0 Release\","
+        "\"prerelease\":false,"
+        "\"published_at\":\"2026-11-14T18:00:00Z\","
+        "\"html_url\":\"https://github.com/JakeMannen/BrewLink/releases/tag/v0.3.0\","
+        "\"body\":\"## Highlights\\nAdded Web UI OTA updates\","
+        "\"assets\":["
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-bootloader.bin\",\"size\":26000,\"browser_download_url\":\"https://example.com/bootloader.bin\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-factory.bin\",\"size\":1380000,\"browser_download_url\":\"https://example.com/factory.bin\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.bin\",\"size\":1310720,\"browser_download_url\":\"https://example.com/firmware.bin\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.elf\",\"size\":8900000,\"browser_download_url\":\"https://example.com/firmware.elf\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0.zip\",\"size\":2400000,\"browser_download_url\":\"https://example.com/bundle.zip\"}"
+        "]"
+        "}";
+
+    ota_release_info_t rel;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_parse_github_release_json(release_json, "0.2.0", &rel));
+    TEST_ASSERT_TRUE(rel.available);
+    TEST_ASSERT_TRUE(rel.update_available);
+    TEST_ASSERT_FALSE(rel.prerelease);
+    TEST_ASSERT_EQUAL_STRING("v0.3.0", rel.tag_name);
+    TEST_ASSERT_EQUAL_STRING("0.3.0", rel.version);
+    TEST_ASSERT_EQUAL_STRING("BrewLink v0.3.0 Release", rel.release_name);
+    TEST_ASSERT_EQUAL_STRING("brewlink-esp32dev-v0.3.0-firmware.bin", rel.asset_name);
+    TEST_ASSERT_EQUAL_STRING("https://example.com/firmware.bin", rel.download_url);
+    TEST_ASSERT_EQUAL_UINT32(1310720U, (uint32_t)rel.asset_size);
+
+    // Same running version -> update_available is false
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_parse_github_release_json(release_json, "0.3.0", &rel));
+    TEST_ASSERT_TRUE(rel.available);
+    TEST_ASSERT_FALSE(rel.update_available);
+
+    // Fallback to -factory.bin if -firmware.bin is omitted
+    const char *factory_only_json =
+        "{\"tag_name\":\"v0.4.0\",\"assets\":["
+        "{\"name\":\"brewlink-esp32dev-v0.4.0.zip\",\"size\":100,\"browser_download_url\":\"https://example.com/b.zip\"},"
+        "{\"name\":\"brewlink-esp32dev-v0.4.0-factory.bin\",\"size\":1400000,\"browser_download_url\":\"https://example.com/factory.bin\"}"
+        "]}";
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_parse_github_release_json(factory_only_json, "0.3.0", &rel));
+    TEST_ASSERT_EQUAL_STRING("brewlink-esp32dev-v0.4.0-factory.bin", rel.asset_name);
+    TEST_ASSERT_TRUE(rel.update_available);
+}
+
+// =============================================================================
 // Test Runner Entrypoint
 // =============================================================================
 int main(int argc, char **argv) {
@@ -1446,6 +1668,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_equipment_manager_fail_fast_when_disconnected);
     RUN_TEST(test_equipment_manager_multi_device_recipe_dispatch);
     RUN_TEST(test_equipment_manager_unique_names_and_power_cycle_persistence);
+
+    // Firmware OTA Verification, SemVer & Release JSON Tests
+    RUN_TEST(test_ota_semver_comparison_and_prereleases);
+    RUN_TEST(test_ota_verify_valid_firmware_bin_header_and_integrity);
+    RUN_TEST(test_ota_verify_merged_factory_bin_extraction);
+    RUN_TEST(test_ota_rejects_invalid_and_wrong_release_files);
+    RUN_TEST(test_ota_parse_github_release_json);
 
     return UNITY_END();
 }

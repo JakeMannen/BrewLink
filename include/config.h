@@ -10,6 +10,13 @@ extern "C" {
 #endif
 
 // =============================================================================
+// Firmware Version & OTA Release Metadata
+// =============================================================================
+#define BREWLINK_FIRMWARE_VERSION           "0.2.0"
+#define BREWLINK_GITHUB_REPO                "JakeMannen/BrewLink"
+#define BREWLINK_GITHUB_RELEASES_API_URL    "https://api.github.com/repos/" BREWLINK_GITHUB_REPO "/releases/latest"
+
+// =============================================================================
 // ESP-IDF Framework Version Constraint (v6.1)
 // =============================================================================
 #define BREWLINK_REQUIRED_IDF_MAJOR         6
