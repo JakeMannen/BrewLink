@@ -195,8 +195,8 @@ esp_err_t config_store_init(void) {
 
     // Ensure a default secret token exists in RAM/NVS so initial pairing or HMAC verification always has a key
     if (strlen(s_cached_config.api_token) == 0) {
-        char rand_hex[57];
-        generate_random_hex(rand_hex, 28);
+        char rand_hex[65];
+        generate_random_hex(rand_hex, 32);
         snprintf(s_cached_config.api_token, sizeof(s_cached_config.api_token), "bl_%s", rand_hex);
     }
     if (strlen(s_cached_config.mqtt_topic_key) == 0) {
@@ -361,6 +361,7 @@ esp_err_t config_store_save_pairing(const char *api_token,
         slot = 0;
     }
 
+    paired_client_t prev_slot = s_cached_config.paired_clients[slot];
     paired_client_t *c_entry = &s_cached_config.paired_clients[slot];
     memset(c_entry, 0, sizeof(paired_client_t));
     c_entry->active = true;
@@ -375,13 +376,14 @@ esp_err_t config_store_save_pairing(const char *api_token,
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
+        s_cached_config.paired_clients[slot] = prev_slot;
         xSemaphoreGive(s_config_mutex);
         ESP_LOGE(TAG, "Failed to open NVS for writing pairing credentials (err=0x%x)", err);
         return err;
     }
 
     err = nvs_set_str(handle, NVS_KEY_API_TOKEN, api_token);
-    if (err == ESP_OK && mqtt_topic_key != NULL) {
+    if (err == ESP_OK && mqtt_topic_key != NULL && mqtt_topic_key[0] != '\0') {
         err = nvs_set_str(handle, NVS_KEY_TOPIC_KEY, mqtt_topic_key);
     }
     if (err == ESP_OK) {
@@ -407,6 +409,9 @@ esp_err_t config_store_save_pairing(const char *api_token,
         s_cached_config.paired_client_name[sizeof(s_cached_config.paired_client_name) - 1] = '\0';
         s_cached_config.client_paired = true;
         ESP_LOGI(TAG, "Persisted pairing token for external client '%s'", eff_name);
+    } else {
+        s_cached_config.paired_clients[slot] = prev_slot;
+        ESP_LOGE(TAG, "Failed to persist pairing credentials to NVS (err=0x%x)", err);
     }
 
     xSemaphoreGive(s_config_mutex);
@@ -458,10 +463,14 @@ esp_err_t config_store_delete_paired_client(const char *client_name) {
     }
     s_cached_config.client_paired = any_active;
     if (!any_active) {
-        // Rotate internal token so deleted client tokens are immediately invalidated
-        char rand_hex[57];
-        generate_random_hex(rand_hex, 28);
+        // Rotate internal token and topic key so deleted client credentials are immediately invalidated
+        char rand_hex[65];
+        generate_random_hex(rand_hex, 32);
         snprintf(s_cached_config.api_token, sizeof(s_cached_config.api_token), "bl_%s", rand_hex);
+
+        char rand_tk[17];
+        generate_random_hex(rand_tk, 8);
+        snprintf(s_cached_config.mqtt_topic_key, sizeof(s_cached_config.mqtt_topic_key), "tk_%s", rand_tk);
     }
 
     nvs_handle_t handle;
@@ -469,9 +478,11 @@ esp_err_t config_store_delete_paired_client(const char *client_name) {
     if (err == ESP_OK) {
         if (any_active) {
             nvs_set_str(handle, NVS_KEY_API_TOKEN, s_cached_config.api_token);
+            nvs_set_str(handle, NVS_KEY_TOPIC_KEY, s_cached_config.mqtt_topic_key);
             nvs_set_str(handle, NVS_KEY_CLIENT_NAME, s_cached_config.paired_client_name);
         } else {
             nvs_erase_key(handle, NVS_KEY_API_TOKEN);
+            nvs_erase_key(handle, NVS_KEY_TOPIC_KEY);
             nvs_erase_key(handle, NVS_KEY_CLIENT_NAME);
         }
         nvs_set_blob(handle, NVS_KEY_PAIRED_CLI, s_cached_config.paired_clients, sizeof(s_cached_config.paired_clients));

@@ -62,8 +62,24 @@ esp_err_t auth_manager_start_pairing(char out_pin[AUTH_PAIRING_PIN_LEN + 1], uin
  * @param[in] client_name Name of external system (e.g. "BeerXML Vault")
  * @param[out] out_token Buffer (at least CONFIG_STORE_TOKEN_MAX_LEN) to receive "bl_..." API token
  * @param[out] out_topic_key Buffer (at least CONFIG_STORE_TOPIC_KEY_MAX_LEN) to receive "tk_..." MQTT key
+ * @param[out] out_client_name Optional buffer (at least CONFIG_STORE_CLIENT_NAME_MAX_LEN) to receive assigned unique name
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if pairing window is closed/expired,
- *         ESP_ERR_INVALID_ARG if a non-empty PIN was provided and does not match.
+ *         ESP_ERR_INVALID_ARG if a non-empty PIN was provided and does not match, or NVS error on persistence failure.
+ */
+esp_err_t auth_manager_claim_pin_ex(const char *pin,
+                                    const char *client_name,
+                                    char out_token[CONFIG_STORE_TOKEN_MAX_LEN],
+                                    char out_topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN],
+                                    char out_client_name[CONFIG_STORE_CLIENT_NAME_MAX_LEN]);
+
+/**
+ * @brief Claim an active pairing session (code-free push-button or optional PIN) and issue credentials
+ * @param[in] pin Optional 6-digit PIN (pass NULL or "" for code-free push-button claim during open window)
+ * @param[in] client_name Name of external system (e.g. "BeerXML Vault")
+ * @param[out] out_token Buffer (at least CONFIG_STORE_TOKEN_MAX_LEN) to receive "bl_..." API token
+ * @param[out] out_topic_key Buffer (at least CONFIG_STORE_TOPIC_KEY_MAX_LEN) to receive "tk_..." MQTT key
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if pairing window is closed/expired,
+ *         ESP_ERR_INVALID_ARG if a non-empty PIN was provided and does not match, or NVS error on persistence failure.
  */
 esp_err_t auth_manager_claim_pin(const char *pin,
                                  const char *client_name,

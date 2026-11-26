@@ -1210,6 +1210,57 @@ void test_auth_unique_client_names_and_deletion(void) {
     TEST_ASSERT_EQUAL_UINT8(0, count);
 }
 
+void test_auth_shared_mqtt_topic_key_rotation_and_claim_ex(void) {
+    auth_manager_set_test_credentials(NULL, NULL, false);
+    s_mock_time_ms = 10000;
+
+    // 1. Pair Client 1 via auth_manager_claim_pin_ex -> gets unique name, 67-char bl_ token, and tk_ key
+    char token1[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char tk1[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    char assigned1[CONFIG_STORE_CLIENT_NAME_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin_ex(NULL, "HomeAssistant", token1, tk1, assigned1));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(assigned1, "HomeAssistant-", 14));
+    TEST_ASSERT_EQUAL_UINT32(67, strlen(token1)); // "bl_" + 64 hex chars
+    TEST_ASSERT_EQUAL_INT(0, strncmp(tk1, "tk_", 3));
+
+    // Verify single-claim lockout immediately closed window in status
+    bool win_open = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_get_status(&win_open, NULL, NULL, NULL, NULL));
+    TEST_ASSERT_FALSE(win_open);
+
+    // 2. Pair Client 2 in a new window -> shares gateway mqtt_topic_key so Client 1 MQTT stays intact
+    char token2[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char tk2[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    char assigned2[CONFIG_STORE_CLIENT_NAME_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin_ex(NULL, "Brewfather", token2, tk2, assigned2));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(assigned2, "Brewfather-", 11));
+    TEST_ASSERT_EQUAL_STRING(tk1, tk2);
+    TEST_ASSERT_FALSE(strcmp(token1, token2) == 0);
+
+    // 3. Delete all clients -> next pairing rotates mqtt_topic_key
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_delete_paired_client(NULL));
+    char token3[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
+    char tk3[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    char assigned3[CONFIG_STORE_CLIENT_NAME_MAX_LEN] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_claim_pin_ex(NULL, "FreshClient", token3, tk3, assigned3));
+    TEST_ASSERT_FALSE(strcmp(tk1, tk3) == 0);
+
+    // 4. Discovery beacon supports non-default port and rejects after 60s expiry
+    char beacon[384] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_start_pairing(NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_format_discovery_beacon("C44F331A8B20", "192.168.1.50", 8080, beacon, sizeof(beacon)));
+    TEST_ASSERT_NOT_NULL(strstr(beacon, "\"claim_url\":\"http://192.168.1.50:8080/api/pair/claim\""));
+    TEST_ASSERT_NOT_NULL(strstr(beacon, "\"ws_url\":\"ws://192.168.1.50:8080/ws\""));
+
+    // Advance mock clock past 60s window -> beacon and claim must fail
+    s_mock_time_ms += (AUTH_PAIRING_WINDOW_SEC * 1000UL) + 500UL;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, auth_manager_format_discovery_beacon("C44F331A8B20", "192.168.1.50", 80, beacon, sizeof(beacon)));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, auth_manager_claim_pin_ex(NULL, "LateClient", token3, tk3, assigned3));
+}
+
 // =============================================================================
 // Multi-Equipment Manager & Fail-Fast Recipe Upload Tests
 // =============================================================================
@@ -1665,6 +1716,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_auth_code_free_push_button_pairing_and_discovery_beacon);
     RUN_TEST(test_auth_hmac_sha256_and_mqtt_command_signing);
     RUN_TEST(test_auth_unique_client_names_and_deletion);
+    RUN_TEST(test_auth_shared_mqtt_topic_key_rotation_and_claim_ex);
     RUN_TEST(test_equipment_manager_fail_fast_when_disconnected);
     RUN_TEST(test_equipment_manager_multi_device_recipe_dispatch);
     RUN_TEST(test_equipment_manager_unique_names_and_power_cycle_persistence);

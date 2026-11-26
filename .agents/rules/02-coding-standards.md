@@ -47,6 +47,7 @@ This rule enforces coding standards, error handling, thread safety, and logging 
 ## 5. Post-Edit Compilation & Build Verification (MANDATORY)
 *   **Always Run**: After finishing ESP code edits, always run:
     ```bash
-    devcontainer exec pio run -e esp32dev -t build
+    devcontainer exec pio run -e esp32dev
     ```
+    *(Do **not** append `-t build`: when a `build/` directory exists in the workspace, SCons treats `build` as an already up-to-date file target and skips compiling changed `.c` files.)*
 *   **Fix Build Errors**: Immediately inspect compiler diagnostics and fix any syntax, type, header inclusion, or linker errors until the build succeeds cleanly before proceeding.

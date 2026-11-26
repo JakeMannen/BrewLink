@@ -18,7 +18,7 @@ This rule strictly prohibits modifying the user's host operating system environm
 ## 2. Devcontainer Isolation Boundary
 *   All firmware compilation, toolchains, libraries, and build scripts must execute inside the designated **VS Code Devcontainer** via:
     ```bash
-    devcontainer exec pio run -e esp32dev -t build
+    devcontainer exec pio run -e esp32dev
     ```
 *   The host environment must remain clean, unmodified, and unpolluted by project-specific tooling.
 

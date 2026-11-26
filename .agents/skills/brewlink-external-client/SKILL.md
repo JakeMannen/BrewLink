@@ -27,13 +27,20 @@ It documents only what external clients see. Internal gateway details (Wi-Fi onb
 ---
 ## 1. Network Broadcast Discovery & Push-Button Pairing
 
-Because the ESP32 gateway operates headlessly when the user holds the physical **`BOOT` button for 3 seconds**, BrewLink supports **code-free push-button pairing** with automatic network broadcast discovery.
+Because the ESP32 gateway operates headlessly when the user holds the physical **`BOOT` button for 3 seconds** (or clicks **Start 60s Pairing Broadcast** in the Web UI / `POST /api/pair/start`), BrewLink supports **code-free push-button pairing** with automatic network broadcast discovery.
 
-While the 60-second pairing window is active, BrewLink broadcasts a discovery beacon every **2 seconds** over both **UDP Broadcast** (for local network clients) and **MQTT** (for cloud/broker clients):
+While the **60-second** pairing window is active, BrewLink emits a discovery beacon **immediately on start** and then every **2 seconds** until **1 client claims the window** (single-claim lockout) or the 60 seconds expire.
 
 ### 1.1. Discovery Broadcast Channels
-* **UDP Broadcast Address**: `255.255.255.255:53540` (External clients bind a UDP socket to `0.0.0.0:53540`)
-* **MQTT Discovery Topic**: `brewlink/discovery/<gateway_id>` (Subscribe to `brewlink/discovery/+`, QoS 0)
+* **UDP Broadcast (Local LAN & SoftAP)**:
+  * **Port**: `53540` (external clients bind a UDP socket to `0.0.0.0:53540` with `SO_REUSEADDR` — and `SO_REUSEPORT` on macOS/BSD if multiple listeners share the port).
+  * **Destinations sent by BrewLink**:
+    * On **Wi-Fi LAN (STA)**: BrewLink sends to both the **STA subnet-directed broadcast** (e.g. `192.168.1.255:53540`) and the **limited broadcast** (`255.255.255.255:53540`), advertising the gateway's STA IP.
+    * On **Setup SoftAP (`BrewLink-Setup-XXXX`)**: Whenever SoftAP clients are connected or STA is offline, BrewLink sends to `192.168.4.255:53540` (plus `255.255.255.255:53540` if STA is offline), advertising `192.168.4.1`.
+  * **Firewall note**: Ensure the client host OS allows inbound UDP packets on port `53540` on the private/LAN network profile.
+* **MQTT Discovery Topic**:
+  * Topic: `brewlink/discovery/<gateway_id>` (clients subscribe to `brewlink/discovery/+`, QoS 0, non-retained).
+  * **Discovery-only**: MQTT discovery tells a broker-connected client the gateway's LAN IP and `claim_url`, but **claiming is HTTP-only** (`POST` to `claim_url`). BrewLink does **not** accept UDP reply datagrams or MQTT claim messages.
 
 ### 1.2. Discovery Beacon JSON Payload
 ```json
@@ -48,12 +55,115 @@ While the 60-second pairing window is active, BrewLink broadcasts a discovery be
   "remaining_sec": 58
 }
 ```
-When an external client receives this beacon, it immediately calls `POST` on `claim_url` (`http://<ip>/api/pair/claim`) with `{"client_name": "..."}` (no PIN required) to claim the pairing session and close the window (single-claim lockout).
 
-### 1.3. Base Addressing After Pairing
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `event` | string | Always `"brewlink_pairing"`; ignore any datagram without this exact value. |
+| `gateway_id` | string | 12-char uppercase hex ESP32 hardware ID. |
+| `name` | string | Human-readable gateway label (`"BrewLink Gateway"`). |
+| `ip` | string | Gateway IPv4 reachable on the interface that carried this beacon (STA IP on LAN, `"192.168.4.1"` on SoftAP). |
+| `http_port` | int | HTTP/WebSocket port (default `80`; included as `:<port>` in URLs if non-80). |
+| `claim_url` | string | Exact HTTP endpoint to `POST` to claim this pairing window (`http://<ip>/api/pair/claim`). |
+| `ws_url` | string | WebSocket endpoint to connect to after pairing (`ws://<ip>/ws`). |
+| `remaining_sec` | int | Seconds remaining in the 60-second broadcast window. |
+
+### 1.3. Step-by-Step Client Auto-Connect Flow During Broadcast
+1. **Listen** on UDP `0.0.0.0:53540` (and/or subscribe to MQTT `brewlink/discovery/+` if the client can reach the gateway's LAN IP over HTTP).
+2. **Parse & filter** UTF-8 JSON payloads for `beacon.event === "brewlink_pairing"`.
+3. **Immediately answer via HTTP `POST`** to `beacon.claim_url` (fallback: `http://<beacon.ip || udp_sender_ip>/api/pair/claim`) with header `Content-Type: application/json` and body:
+   ```json
+   {"client_name": "MyBrewApp"}
+   ```
+   * **No PIN required** during the open broadcast window (do not prompt the user for a PIN unless doing manual pairing).
+   * **Payload limit**: Keep the JSON body under `256` bytes (`client_name` up to 25 chars before BrewLink appends `-<4hex>`).
+   * **Browser / Web App clients**: CORS is enabled (`Access-Control-Allow-Origin: *`, `OPTIONS` preflight supported), so browser clients that know the gateway IP can `fetch(claim_url, { method: "POST", ... })` directly.
+4. **Respect single-claim lockout**:
+   * **Only 1 client can pair per 60-second broadcast window.** As soon as BrewLink persists the client and returns `200 OK`, it immediately closes the window and stops broadcasting beacons.
+   * Stop listening/claiming once you receive `200 OK`.
+   * If you receive `403 PAIRING_WINDOW_CLOSED`, another client claimed the window or it expired — ask the user to trigger pairing again (hold `BOOT` 3s or click Start in Web UI).
+   * If you receive `500 PAIRING_SAVE_FAILED`, NVS persistence failed and the window stays open — safe to retry briefly.
+5. **Persist credentials & connect immediately** (no gateway reboot required):
+   * Save `client_name`, `api_token` (`bl_` + 64 hex chars), `gateway_id`, `ws_url`, `mqtt_broker_uri`, `mqtt_topic_key` (`tk_` + 16 hex chars), and `mqtt_topic_prefix`.
+   * **HTTP REST**: Immediately call `GET http://<ip>/api/equipment` with `Authorization: Bearer <api_token>` (or `X-BrewLink-Token: <api_token>`).
+   * **WebSocket**: Immediately connect to `ws_url` (`ws://<ip>/ws?token=<api_token>` or `Authorization: Bearer <api_token>`).
+   * **MQTT**: Immediately connect to `mqtt_broker_uri`, subscribe to `<mqtt_topic_prefix><gateway_id>/equipment/+/telemetry` and `<mqtt_topic_prefix><gateway_id>/equipment`, and publish signed commands to `<mqtt_topic_prefix><gateway_id>/cmd`. BrewLink automatically subscribes to the paired command topics and republishes retained `/status` and `/equipment` on pairing.
+
+### 1.4. Minimal Broadcast Discovery & Auto-Claim Examples
+
+**Python (stdlib only — see also `tools/beerxml_uploader.py --pair`)**:
+```python
+import json, socket, urllib.request
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", 53540))
+sock.settimeout(65)
+
+try:
+    while True:
+        data, (sender_ip, _) = sock.recvfrom(1024)
+        try:
+            beacon = json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if beacon.get("event") != "brewlink_pairing":
+            continue
+
+        claim_url = beacon.get("claim_url") or f"http://{beacon.get('ip') or sender_ip}/api/pair/claim"
+        req = urllib.request.Request(
+            claim_url,
+            data=json.dumps({"client_name": "MyBrewApp"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            creds = json.loads(resp.read().decode("utf-8"))
+        # Persist creds["api_token"], creds["ws_url"], creds["mqtt_topic_prefix"], creds["gateway_id"]
+        print("Paired:", creds["client_name"], creds["ws_url"])
+        break
+finally:
+    sock.close()
+```
+
+**Node.js (built-in `dgram` + `fetch`)**:
+```javascript
+const dgram = require('dgram');
+
+const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+let claiming = false;
+
+sock.on('message', async (msg, rinfo) => {
+  if (claiming) return;
+  let beacon;
+  try { beacon = JSON.parse(msg.toString('utf8')); } catch { return; }
+  if (beacon.event !== 'brewlink_pairing') return;
+
+  claiming = true;
+  const claimUrl = beacon.claim_url || `http://${beacon.ip || rinfo.address}/api/pair/claim`;
+  try {
+    const res = await fetch(claimUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_name: 'MyBrewApp' }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    const creds = await res.json();
+    console.log('Paired:', creds.client_name, creds.ws_url);
+    sock.close();
+  } catch (err) {
+    claiming = false;
+    console.error('Claim failed:', err.message);
+  }
+});
+
+sock.bind(53540, '0.0.0.0');
+```
+
+### 1.5. Base Addressing After Pairing
 * **HTTP Base URL**: `http://<gateway-ip>/` (Port `80`)
-* **WebSocket URL**: `ws://<gateway-ip>/ws`
+* **WebSocket URL**: Returned in the pairing response (`ws_url`, e.g. `ws://<gateway-ip>/ws`; uses `192.168.4.1` automatically if claimed over SoftAP)
 * **MQTT Broker URI**: Returned in the pairing response (`mqtt_broker_uri`)
+* **MQTT Topic Key & Prefix**: Returned in the pairing response (`mqtt_topic_key`, `mqtt_topic_prefix`). Multiple paired clients (up to 8) share the gateway's active `mqtt_topic_key` while each keeps its own unique `api_token`; deleting all paired clients rotates the `mqtt_topic_key`.
 * **Gateway Identifier (`gateway_id`)**: 12-character uppercase hex string derived from the ESP32 MAC (e.g. `C44F331A8B20`)
 
 ---
@@ -110,9 +220,11 @@ When the 60-second pairing window is open (triggered via physical `BOOT` button 
   }
   ```
 * **Errors**:
-  * `403 Forbidden` (`PAIRING_WINDOW_CLOSED`) — Pairing window is not open, has expired, or was already claimed by another client.
+  * `400 Bad Request` — Invalid JSON or payload size >= 256 bytes.
   * `401 Unauthorized` (`INVALID_PIN`) — A non-empty `pin` was provided and did not match.
-* **Client Action**: Persist `client_name`, `api_token`, `gateway_id`, `ws_url`, and `mqtt_topic_key` securely. They do not expire unless deleted or reset on the gateway.
+  * `403 Forbidden` (`PAIRING_WINDOW_CLOSED`) — Pairing window is not open, has expired, or was already claimed by another client.
+  * `500 Internal Server Error` (`PAIRING_SAVE_FAILED`) — Gateway failed to persist credentials to NVS (pairing window stays open so the client may retry).
+* **Client Action**: Persist `client_name`, `api_token`, `gateway_id`, `ws_url`, `mqtt_topic_key`, and `mqtt_topic_prefix` securely. They do not expire unless deleted or reset on the gateway, and work immediately across HTTP, WebSocket, and MQTT without rebooting the gateway.
 
 ---
 

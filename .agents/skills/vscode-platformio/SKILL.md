@@ -25,13 +25,14 @@ This skill guides the agent through compiling, flashing, monitoring, testing, an
 
 ### 2.1. Compile Firmware & Post-Edit Build Verification (MANDATORY)
 * **Agent Rule**: Always run the build command immediately after finishing ESP code edits and fix any compiler/build errors.
+* **Important**: Do **not** pass `-t build`. Because a `build/` directory exists in the workspace, PlatformIO/SCons treats `-t build` as an already up-to-date directory target (`'build' is up to date`) and silently skips compiling modified C sources.
 * **From Host (Agent Execution)**:
   ```bash
-  devcontainer exec pio run -e esp32dev -t build
+  devcontainer exec pio run -e esp32dev
   ```
 * **Inside Devcontainer**:
   ```bash
-  pio run -e esp32dev -t build
+  pio run -e esp32dev
   ```
 
 ### 2.2. Static Code Analysis
@@ -85,7 +86,7 @@ usbipd attach --wsl --busid <BUSID>
    ```
 
 ### 3.3. When Flashing Hardware is Unavailable to Agent
-If operating in an isolated sandbox, run compilation (`devcontainer exec pio run -e esp32dev -t build`) and instruct the user to execute the flash command from their VS Code terminal.
+If operating in an isolated sandbox, run compilation (`devcontainer exec pio run -e esp32dev`) and instruct the user to execute the flash command from their VS Code terminal.
 
 ---
 
