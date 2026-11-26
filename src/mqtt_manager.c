@@ -300,6 +300,56 @@ bool mqtt_manager_is_connected(void) {
     return s_connected;
 }
 
+esp_err_t mqtt_manager_refresh_pairing_subscriptions(void) {
+    if (s_mqtt_mutex == NULL) {
+        return ESP_OK;
+    }
+    if (xSemaphoreTake(s_mqtt_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (!s_connected || s_mqtt_client == NULL) {
+        xSemaphoreGive(s_mqtt_mutex);
+        return ESP_OK;
+    }
+
+    ensure_gateway_id_initialized();
+    brewlink_config_t cfg;
+    esp_err_t cfg_err = config_store_get(&cfg);
+    if (cfg_err != ESP_OK) {
+        xSemaphoreGive(s_mqtt_mutex);
+        return cfg_err;
+    }
+
+    char eff_prefix[128];
+    get_effective_prefix(&cfg, eff_prefix, sizeof(eff_prefix));
+
+    char sub_topic[192];
+    snprintf(sub_topic, sizeof(sub_topic), "%s%s/equipment/+/cmd", eff_prefix, s_gateway_id);
+    int msg_id1 = esp_mqtt_client_subscribe(s_mqtt_client, sub_topic, MQTT_QOS_COMMAND);
+    if (msg_id1 < 0) {
+        ESP_LOGW(TAG, "Failed to subscribe to paired equipment cmd topic: %s", sub_topic);
+    } else {
+        ESP_LOGI(TAG, "Subscribed to paired topic: %s", sub_topic);
+    }
+
+    snprintf(sub_topic, sizeof(sub_topic), "%s%s/cmd", eff_prefix, s_gateway_id);
+    int msg_id2 = esp_mqtt_client_subscribe(s_mqtt_client, sub_topic, MQTT_QOS_COMMAND);
+    if (msg_id2 < 0) {
+        ESP_LOGW(TAG, "Failed to subscribe to paired gateway cmd topic: %s", sub_topic);
+    } else {
+        ESP_LOGI(TAG, "Subscribed to paired topic: %s", sub_topic);
+    }
+
+    mqtt_conn_status_cb_t conn_cb = s_conn_callback;
+    xSemaphoreGive(s_mqtt_mutex);
+
+    if (conn_cb != NULL) {
+        conn_cb(true);
+    }
+    return (msg_id1 >= 0 && msg_id2 >= 0) ? ESP_OK : ESP_FAIL;
+}
+
 const char *mqtt_manager_get_gateway_id(void) {
     ensure_gateway_id_initialized();
     return s_gateway_id;

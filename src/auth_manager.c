@@ -11,9 +11,11 @@
 #include <ctype.h>
 
 #ifdef ESP_PLATFORM
+#include <errno.h>
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_netif.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -41,6 +43,7 @@ static paired_client_t s_test_clients[CONFIG_STORE_MAX_PAIRED_CLIENTS];
 
 #ifdef ESP_PLATFORM
 static SemaphoreHandle_t s_auth_mutex = NULL;
+static TaskHandle_t      s_boot_btn_task = NULL;
 static int               s_udp_sock = -1;
 #endif
 
@@ -480,12 +483,21 @@ esp_err_t auth_manager_format_discovery_beacon(const char *gateway_id,
     const char *ip = (ip_str && ip_str[0]) ? ip_str : "192.168.4.1";
     uint16_t port = (http_port > 0) ? http_port : 80;
 
-    snprintf(out_json, max_len,
-             "{\"event\":\"brewlink_pairing\",\"gateway_id\":\"%s\","
-             "\"name\":\"BrewLink Gateway\",\"ip\":\"%s\",\"http_port\":%u,"
-             "\"claim_url\":\"http://%s/api/pair/claim\","
-             "\"ws_url\":\"ws://%s/ws\",\"remaining_sec\":%lu}",
-             gw, ip, (unsigned int)port, ip, ip, (unsigned long)rem_sec);
+    if (port == 80) {
+        snprintf(out_json, max_len,
+                 "{\"event\":\"brewlink_pairing\",\"gateway_id\":\"%s\","
+                 "\"name\":\"BrewLink Gateway\",\"ip\":\"%s\",\"http_port\":%u,"
+                 "\"claim_url\":\"http://%s/api/pair/claim\","
+                 "\"ws_url\":\"ws://%s/ws\",\"remaining_sec\":%lu}",
+                 gw, ip, (unsigned int)port, ip, ip, (unsigned long)rem_sec);
+    } else {
+        snprintf(out_json, max_len,
+                 "{\"event\":\"brewlink_pairing\",\"gateway_id\":\"%s\","
+                 "\"name\":\"BrewLink Gateway\",\"ip\":\"%s\",\"http_port\":%u,"
+                 "\"claim_url\":\"http://%s:%u/api/pair/claim\","
+                 "\"ws_url\":\"ws://%s:%u/ws\",\"remaining_sec\":%lu}",
+                 gw, ip, (unsigned int)port, ip, (unsigned int)port, ip, (unsigned int)port, (unsigned long)rem_sec);
+    }
 
 #ifdef ESP_PLATFORM
     if (s_auth_mutex != NULL) {
@@ -496,45 +508,133 @@ esp_err_t auth_manager_format_discovery_beacon(const char *gateway_id,
 }
 
 #ifdef ESP_PLATFORM
+// Note: s_udp_sock is owned exclusively by boot_button_monitor_task on Core 1 (no cross-core socket sharing).
+static void close_udp_sock_if_open(void) {
+    if (s_udp_sock >= 0) {
+        close(s_udp_sock);
+        s_udp_sock = -1;
+    }
+}
+
+static bool compute_netif_broadcast_ip(const char *ifkey, uint32_t *out_bcast_nbo) {
+    if (ifkey == NULL || out_bcast_nbo == NULL) {
+        return false;
+    }
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(ifkey);
+    if (netif == NULL) {
+        return false;
+    }
+    esp_netif_ip_info_t ip_info;
+    memset(&ip_info, 0, sizeof(ip_info));
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
+        return false;
+    }
+    *out_bcast_nbo = (ip_info.ip.addr & ip_info.netmask.addr) | (~ip_info.netmask.addr);
+    return true;
+}
+
+static void send_udp_beacon_to_addr(uint32_t dest_ip_nbo, const char *beacon_json, const char *label) {
+    if (s_udp_sock < 0) {
+        s_udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s_udp_sock < 0) {
+            ESP_LOGW(TAG, "Failed to create UDP broadcast socket (errno=%d)", errno);
+            return;
+        }
+        int broadcast_enable = 1;
+        if (setsockopt(s_udp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)) < 0) {
+            ESP_LOGW(TAG, "Failed to enable SO_BROADCAST on UDP socket (errno=%d)", errno);
+            close_udp_sock_if_open();
+            return;
+        }
+    }
+
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(AUTH_DISCOVERY_UDP_PORT);
+    dest_addr.sin_addr.s_addr = dest_ip_nbo;
+
+    int sent = sendto(s_udp_sock, beacon_json, strlen(beacon_json), 0,
+                      (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (sent < 0) {
+        int err_no = errno;
+        ESP_LOGW(TAG, "UDP pairing broadcast (%s) sendto failed (errno=%d)", label ? label : "udp", err_no);
+        if (err_no == EBADF || err_no == EINVAL || err_no == ENOTCONN || err_no == EPIPE) {
+            close_udp_sock_if_open();
+        }
+    }
+}
+
+static bool is_pairing_window_open_safe(void) {
+    if (s_auth_mutex != NULL) {
+        xSemaphoreTake(s_auth_mutex, pdMS_TO_TICKS(100));
+    }
+    uint32_t now = get_now_ms();
+    if (s_window_open && (int32_t)(s_pin_expires_at_ms - now) <= 0) {
+        s_window_open = false;
+        memset(s_active_pin, 0, sizeof(s_active_pin));
+    }
+    bool open = s_window_open;
+    if (s_auth_mutex != NULL) {
+        xSemaphoreGive(s_auth_mutex);
+    }
+    return open;
+}
+
 static void broadcast_pairing_beacon_once(void) {
     wifi_mgr_status_t wifi_stat;
     memset(&wifi_stat, 0, sizeof(wifi_stat));
-    wifi_manager_get_status(&wifi_stat);
-
-    const char *ip_str = (wifi_stat.sta_connected && wifi_stat.sta_ip[0] != '\0')
-                         ? wifi_stat.sta_ip
-                         : "192.168.4.1";
-    const char *gw_id = mqtt_manager_get_gateway_id();
-
-    char beacon_json[320];
-    if (auth_manager_format_discovery_beacon(gw_id, ip_str, WEB_SERVER_PORT,
-                                             beacon_json, sizeof(beacon_json)) != ESP_OK) {
+    if (wifi_manager_get_status(&wifi_stat) != ESP_OK) {
+        ESP_LOGW(TAG, "Unable to read Wi-Fi status for pairing broadcast");
         return;
     }
 
-    // 1. Send UDP broadcast datagram to 255.255.255.255:53540
-    if (s_udp_sock < 0) {
-        s_udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (s_udp_sock >= 0) {
-            int broadcast_enable = 1;
-            setsockopt(s_udp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable));
+    const char *gw_id = mqtt_manager_get_gateway_id();
+    char beacon_json[320];
+
+    // 1. STA LAN broadcast (directed subnet broadcast + 255.255.255.255) & MQTT discovery
+    if (wifi_stat.sta_connected && wifi_stat.sta_ip[0] != '\0') {
+        if (auth_manager_format_discovery_beacon(gw_id, wifi_stat.sta_ip, WEB_SERVER_PORT,
+                                                 beacon_json, sizeof(beacon_json)) != ESP_OK) {
+            close_udp_sock_if_open();
+            return;
+        }
+
+        uint32_t sta_bcast_nbo = 0;
+        if (compute_netif_broadcast_ip("WIFI_STA_DEF", &sta_bcast_nbo) &&
+            sta_bcast_nbo != htonl(INADDR_BROADCAST)) {
+            send_udp_beacon_to_addr(sta_bcast_nbo, beacon_json, "sta-subnet");
+        }
+        send_udp_beacon_to_addr(htonl(INADDR_BROADCAST), beacon_json, "sta-global");
+
+        if (mqtt_manager_is_connected()) {
+            char disc_topic[96];
+            snprintf(disc_topic, sizeof(disc_topic), "brewlink/discovery/%s", gw_id);
+            esp_err_t pub_err = mqtt_manager_publish(disc_topic, beacon_json, 0, 0, 0);
+            if (pub_err != ESP_OK) {
+                ESP_LOGW(TAG, "MQTT pairing discovery publish failed (err=0x%x)", pub_err);
+            }
         }
     }
-    if (s_udp_sock >= 0) {
-        struct sockaddr_in dest_addr;
-        memset(&dest_addr, 0, sizeof(dest_addr));
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(AUTH_DISCOVERY_UDP_PORT);
-        dest_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-        sendto(s_udp_sock, beacon_json, strlen(beacon_json), 0,
-               (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    }
 
-    // 2. Publish MQTT discovery announcement if broker is connected
-    if (mqtt_manager_is_connected()) {
-        char disc_topic[96];
-        snprintf(disc_topic, sizeof(disc_topic), "brewlink/discovery/%s", gw_id);
-        mqtt_manager_publish(disc_topic, beacon_json, 0, 0, 0);
+    // 2. SoftAP broadcast (192.168.4.1 payload) when AP has clients or STA is disconnected
+    if (wifi_stat.ap_active && (wifi_stat.ap_clients_count > 0 || !wifi_stat.sta_connected)) {
+        const char *ap_ip = (wifi_stat.ap_ip[0] != '\0') ? wifi_stat.ap_ip : "192.168.4.1";
+        if (auth_manager_format_discovery_beacon(gw_id, ap_ip, WEB_SERVER_PORT,
+                                                 beacon_json, sizeof(beacon_json)) != ESP_OK) {
+            close_udp_sock_if_open();
+            return;
+        }
+
+        uint32_t ap_bcast_nbo = 0;
+        if (compute_netif_broadcast_ip("WIFI_AP_DEF", &ap_bcast_nbo)) {
+            send_udp_beacon_to_addr(ap_bcast_nbo, beacon_json, "ap-subnet");
+        } else {
+            send_udp_beacon_to_addr(inet_addr("192.168.4.255"), beacon_json, "ap-subnet-fallback");
+        }
+        if (!wifi_stat.sta_connected) {
+            send_udp_beacon_to_addr(htonl(INADDR_BROADCAST), beacon_json, "ap-global");
+        }
     }
 }
 #endif
@@ -566,15 +666,19 @@ esp_err_t auth_manager_start_pairing(char out_pin[AUTH_PAIRING_PIN_LEN + 1], uin
     if (s_auth_mutex != NULL) {
         xSemaphoreGive(s_auth_mutex);
     }
-    broadcast_pairing_beacon_once();
+    // Wake the Core 1 monitor task to emit the first beacon immediately (single socket owner)
+    if (s_boot_btn_task != NULL) {
+        xTaskNotifyGive(s_boot_btn_task);
+    }
 #endif
     return ESP_OK;
 }
 
-esp_err_t auth_manager_claim_pin(const char *pin,
-                                 const char *client_name,
-                                 char out_token[CONFIG_STORE_TOKEN_MAX_LEN],
-                                 char out_topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN]) {
+esp_err_t auth_manager_claim_pin_ex(const char *pin,
+                                    const char *client_name,
+                                    char out_token[CONFIG_STORE_TOKEN_MAX_LEN],
+                                    char out_topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN],
+                                    char out_client_name[CONFIG_STORE_CLIENT_NAME_MAX_LEN]) {
     if (out_token == NULL || out_topic_key == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -607,27 +711,72 @@ esp_err_t auth_manager_claim_pin(const char *pin,
         }
     }
 
-    // Single-claim lockout: immediately close pairing window and issue credentials
-    s_window_open = false;
-    memset(s_active_pin, 0, sizeof(s_active_pin));
-
-    char rand_token_hex[57];
-    generate_hex_bytes(rand_token_hex, 28);
+    char rand_token_hex[65];
+    generate_hex_bytes(rand_token_hex, 32);
     snprintf(out_token, CONFIG_STORE_TOKEN_MAX_LEN, "bl_%s", rand_token_hex);
 
-    char rand_tk_hex[17];
-    generate_hex_bytes(rand_tk_hex, 8);
-    snprintf(out_topic_key, CONFIG_STORE_TOPIC_KEY_MAX_LEN, "tk_%s", rand_tk_hex);
+    // Share one gateway-level mqtt_topic_key across active paired clients so adding a 2nd client
+    // does not break MQTT topics for already-paired clients; rotate when pairing from unpaired state.
+    paired_client_t existing[CONFIG_STORE_MAX_PAIRED_CLIENTS];
+    uint8_t existing_count = 0;
+    auth_manager_get_paired_clients(existing, &existing_count);
+
+    char shared_tk[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    if (existing_count > 0) {
+        for (int i = 0; i < CONFIG_STORE_MAX_PAIRED_CLIENTS; i++) {
+            if (existing[i].active && existing[i].mqtt_topic_key[0] != '\0') {
+                strncpy(shared_tk, existing[i].mqtt_topic_key, sizeof(shared_tk) - 1);
+                break;
+            }
+        }
+    }
+
+    if (shared_tk[0] != '\0') {
+        snprintf(out_topic_key, CONFIG_STORE_TOPIC_KEY_MAX_LEN, "%s", shared_tk);
+    } else {
+        char rand_tk_hex[17];
+        generate_hex_bytes(rand_tk_hex, 8);
+        snprintf(out_topic_key, CONFIG_STORE_TOPIC_KEY_MAX_LEN, "tk_%s", rand_tk_hex);
+    }
 
     char unique_cname[CONFIG_STORE_CLIENT_NAME_MAX_LEN] = {0};
     format_unique_client_name(client_name, unique_cname);
 
 #ifdef ESP_PLATFORM
-    config_store_save_pairing(out_token, out_topic_key, unique_cname);
+    esp_err_t save_err = config_store_save_pairing(out_token, out_topic_key, unique_cname);
+    if (save_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist pairing credentials for '%s' (err=0x%x)", unique_cname, save_err);
+        if (s_auth_mutex != NULL) {
+            xSemaphoreGive(s_auth_mutex);
+        }
+        return save_err;
+    }
+
+    // Single-claim lockout: close pairing window immediately once client is persisted
+    s_window_open = false;
+    memset(s_active_pin, 0, sizeof(s_active_pin));
+
+    if (out_client_name != NULL) {
+        strncpy(out_client_name, unique_cname, CONFIG_STORE_CLIENT_NAME_MAX_LEN - 1);
+        out_client_name[CONFIG_STORE_CLIENT_NAME_MAX_LEN - 1] = '\0';
+    }
+
     if (s_auth_mutex != NULL) {
         xSemaphoreGive(s_auth_mutex);
     }
+
+    // Dynamically subscribe MQTT client to the paired topic namespace without waiting for reconnect
+    mqtt_manager_refresh_pairing_subscriptions();
 #else
+    // Single-claim lockout: close pairing window immediately
+    s_window_open = false;
+    memset(s_active_pin, 0, sizeof(s_active_pin));
+
+    if (out_client_name != NULL) {
+        strncpy(out_client_name, unique_cname, CONFIG_STORE_CLIENT_NAME_MAX_LEN - 1);
+        out_client_name[CONFIG_STORE_CLIENT_NAME_MAX_LEN - 1] = '\0';
+    }
+
     strncpy(s_test_api_token, out_token, sizeof(s_test_api_token) - 1);
     strncpy(s_test_topic_key, out_topic_key, sizeof(s_test_topic_key) - 1);
     strncpy(s_test_client_name, unique_cname, sizeof(s_test_client_name) - 1);
@@ -654,6 +803,13 @@ esp_err_t auth_manager_claim_pin(const char *pin,
 #endif
 
     return ESP_OK;
+}
+
+esp_err_t auth_manager_claim_pin(const char *pin,
+                                 const char *client_name,
+                                 char out_token[CONFIG_STORE_TOKEN_MAX_LEN],
+                                 char out_topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN]) {
+    return auth_manager_claim_pin_ex(pin, client_name, out_token, out_topic_key, NULL);
 }
 
 esp_err_t auth_manager_get_status(bool *out_window_open,
@@ -804,33 +960,39 @@ static void boot_button_monitor_task(void *pvParameters) {
     };
     gpio_config(&io_conf);
 
-    uint32_t hold_ms = 0;
-    uint32_t beacon_elapsed_ms = 0;
+    uint32_t hold_start_ms = 0;
+    bool holding = false;
     bool triggered = false;
+    uint32_t last_beacon_ms = 0;
 
     while (1) {
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+        uint32_t now_ms = get_now_ms();
+
         if (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
-            hold_ms += 100;
-            if (hold_ms >= AUTH_BOOT_BTN_HOLD_MS && !triggered) {
+            if (!holding) {
+                holding = true;
+                hold_start_ms = now_ms;
+            } else if (!triggered && (uint32_t)(now_ms - hold_start_ms) >= AUTH_BOOT_BTN_HOLD_MS) {
                 triggered = true;
                 ESP_LOGI(TAG, "BOOT button held for 3s -> activating 60s Pairing Broadcast Mode!");
                 auth_manager_start_pairing(NULL, NULL);
-                beacon_elapsed_ms = 0;
             }
         } else {
-            hold_ms = 0;
+            holding = false;
             triggered = false;
         }
 
-        beacon_elapsed_ms += 100;
-        if (beacon_elapsed_ms >= AUTH_DISCOVERY_INTERVAL_MS) {
-            beacon_elapsed_ms = 0;
-            if (s_window_open) {
+        if (is_pairing_window_open_safe()) {
+            if (notified > 0 || last_beacon_ms == 0 ||
+                (uint32_t)(now_ms - last_beacon_ms) >= AUTH_DISCOVERY_INTERVAL_MS) {
                 broadcast_pairing_beacon_once();
+                last_beacon_ms = now_ms;
             }
+        } else {
+            last_beacon_ms = 0;
+            close_udp_sock_if_open();
         }
-
-        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 #endif
@@ -844,15 +1006,21 @@ esp_err_t auth_manager_init(void) {
         }
     }
 
-    xTaskCreatePinnedToCore(
-        boot_button_monitor_task,
-        "boot_btn_pair",
-        4096,
-        NULL,
-        4,
-        NULL,
-        APP_PROCESSING_TASK_CORE
-    );
+    if (s_boot_btn_task == NULL) {
+        BaseType_t ok = xTaskCreatePinnedToCore(
+            boot_button_monitor_task,
+            "boot_btn_pair",
+            4096,
+            NULL,
+            4,
+            &s_boot_btn_task,
+            APP_PROCESSING_TASK_CORE
+        );
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create boot_btn_pair task");
+            return ESP_ERR_NO_MEM;
+        }
+    }
 #endif
     return ESP_OK;
 }

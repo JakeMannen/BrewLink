@@ -869,10 +869,9 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // 2. Initialize Persistent Configuration Store, OTA & Security / Pairing Manager
+    // 2. Initialize Persistent Configuration Store & OTA Manager
     ESP_ERROR_CHECK(config_store_init());
     ESP_ERROR_CHECK(ota_manager_init());
-    ESP_ERROR_CHECK(auth_manager_init());
 
     // 3. Derive Gateway Hardware ID
     uint8_t base_mac[6];
@@ -961,7 +960,10 @@ void app_main(void) {
     // 9. Initialize Wi-Fi Subsystem (SoftAP broadcasting if no STA connected)
     ESP_ERROR_CHECK(wifi_manager_init(on_wifi_sta_status_change));
 
-    // 10. Start Embedded Web Configuration Server on port 80 (Core 0)
+    // 10. Initialize Security / Pairing Manager (after netif, MQTT, and Wi-Fi are ready)
+    ESP_ERROR_CHECK(auth_manager_init());
+
+    // 11. Start Embedded Web Configuration Server on port 80 (Core 0)
     ESP_ERROR_CHECK(web_server_start());
 
     ESP_LOGI(TAG, "BrewLink Gateway initialization complete! Free Heap: %lu bytes",

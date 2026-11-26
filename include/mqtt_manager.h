@@ -58,6 +58,12 @@ esp_err_t mqtt_manager_reconfigure(const char *uri, const char *username,
 bool mqtt_manager_is_connected(void);
 
 /**
+ * @brief Refresh MQTT command subscriptions and republish retained state after client pairing changes
+ * @return ESP_OK on success, or ESP error code.
+ */
+esp_err_t mqtt_manager_refresh_pairing_subscriptions(void);
+
+/**
  * @brief Get Gateway ID used for topics and authentication
  * @return Gateway ID string
  */

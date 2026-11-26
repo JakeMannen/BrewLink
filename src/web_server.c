@@ -67,6 +67,46 @@ static equipment_type_t parse_equipment_type_str(const char *str) {
     return EQUIPMENT_TYPE_UNKNOWN;
 }
 
+// Add permissive CORS headers for external browser-based clients
+static void set_cors_headers(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, Authorization, X-BrewLink-Token");
+}
+
+static esp_err_t api_cors_options_handler(httpd_req_t *req) {
+    set_cors_headers(req);
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
+
+// Read the full HTTP request body into buf (handles TCP fragmentation and transient timeouts)
+static int recv_req_body_all(httpd_req_t *req, char *buf, size_t max_len) {
+    int total_len = req->content_len;
+    if (total_len < 0 || (size_t)total_len >= max_len) {
+        return -1;
+    }
+    int received = 0;
+    int timeouts = 0;
+    while (received < total_len) {
+        int r = httpd_req_recv(req, buf + received, total_len - received);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            timeouts++;
+            if (timeouts > 5) {
+                return -1;
+            }
+            continue;
+        }
+        if (r <= 0) {
+            return -1;
+        }
+        received += r;
+        timeouts = 0;
+    }
+    buf[received] = '\0';
+    return received;
+}
+
 // Verify HTTP/WebSocket authentication via Authorization header, X-BrewLink-Token, or ?token=
 static bool verify_external_request_auth(httpd_req_t *req) {
     bool is_paired = false;
@@ -330,6 +370,7 @@ static esp_err_t api_status_get_handler(httpd_req_t *req) {
     cJSON_Delete(root);
 
     httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
     esp_err_t ret = httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
     free(json_str);
     return ret;
@@ -341,6 +382,7 @@ static esp_err_t api_status_get_handler(httpd_req_t *req) {
 
 // GET /api/pair/status
 static esp_err_t api_pair_status_get_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     bool open = false;
     char pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
     uint32_t rem = 0;
@@ -381,6 +423,7 @@ static esp_err_t api_pair_status_get_handler(httpd_req_t *req) {
 
 // POST /api/pair/start - Open 60-second pairing window and generate 6-digit PIN
 static esp_err_t api_pair_start_post_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     char pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
     uint32_t ttl = 0;
     auth_manager_start_pairing(pin, &ttl);
@@ -395,6 +438,7 @@ static esp_err_t api_pair_start_post_handler(httpd_req_t *req) {
 
 // POST /api/pair/claim - Claim pairing window (code-free push-button or optional 6-digit PIN) for persistent API Token & MQTT Topic Key
 static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     char buf[256];
     int remaining = req->content_len;
     if (remaining < 0 || remaining >= (int)sizeof(buf)) {
@@ -407,12 +451,11 @@ static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
     const char *cname = "BeerXML-System";
 
     if (remaining > 0) {
-        int ret = httpd_req_recv(req, buf, remaining);
+        int ret = recv_req_body_all(req, buf, sizeof(buf));
         if (ret <= 0) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
             return ESP_FAIL;
         }
-        buf[ret] = '\0';
 
         root = cJSON_Parse(buf);
         if (root == NULL) {
@@ -436,8 +479,9 @@ static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
 
     char token[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
     char topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
+    char assigned_name[CONFIG_STORE_CLIENT_NAME_MAX_LEN] = {0};
 
-    esp_err_t err = auth_manager_claim_pin(pin_str, cname, token, topic_key);
+    esp_err_t err = auth_manager_claim_pin_ex(pin_str, cname, token, topic_key, assigned_name);
     if (root) {
         cJSON_Delete(root);
     }
@@ -446,19 +490,32 @@ static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, "{\"status\":\"error\",\"error_code\":\"PAIRING_WINDOW_CLOSED\",\"message\":\"Pairing window is not open or has expired\"}", HTTPD_RESP_USE_STRLEN);
-    } else if (err != ESP_OK) {
+    } else if (err == ESP_ERR_INVALID_ARG) {
         httpd_resp_set_status(req, "401 Unauthorized");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, "{\"status\":\"error\",\"error_code\":\"INVALID_PIN\",\"message\":\"Invalid pairing PIN\"}", HTTPD_RESP_USE_STRLEN);
+    } else if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"status\":\"error\",\"error_code\":\"PAIRING_SAVE_FAILED\",\"message\":\"Failed to persist pairing credentials\"}", HTTPD_RESP_USE_STRLEN);
     }
 
     wifi_mgr_status_t wifi_stat;
+    memset(&wifi_stat, 0, sizeof(wifi_stat));
     wifi_manager_get_status(&wifi_stat);
     brewlink_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
     config_store_get(&cfg);
 
     const char *gw_id = mqtt_manager_get_gateway_id();
-    const char *ip_str = wifi_stat.sta_connected ? wifi_stat.sta_ip : "192.168.4.1";
+    const char *ip_str = (wifi_stat.sta_connected && wifi_stat.sta_ip[0] != '\0') ? wifi_stat.sta_ip : "192.168.4.1";
+
+    // If client connected via SoftAP (Host: 192.168.4.1), keep ws_url reachable on SoftAP
+    char host_hdr[64] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Host", host_hdr, sizeof(host_hdr)) == ESP_OK &&
+        strncmp(host_hdr, "192.168.4.1", 11) == 0) {
+        ip_str = "192.168.4.1";
+    }
 
     char ws_url[96];
     snprintf(ws_url, sizeof(ws_url), "ws://%s/ws", ip_str);
@@ -471,7 +528,7 @@ static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "status", "paired");
     cJSON_AddStringToObject(resp, "gateway_id", gw_id);
-    cJSON_AddStringToObject(resp, "client_name", cfg.paired_client_name);
+    cJSON_AddStringToObject(resp, "client_name", assigned_name[0] ? assigned_name : cfg.paired_client_name);
     cJSON_AddStringToObject(resp, "api_token", token);
     cJSON_AddStringToObject(resp, "ws_url", ws_url);
     cJSON_AddStringToObject(resp, "mqtt_broker_uri", cfg.mqtt_broker_uri);
@@ -488,18 +545,18 @@ static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
 
 // POST /api/pair/delete - Delete a paired external client by unique name (or all if omitted/empty)
 static esp_err_t api_pair_delete_post_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     char buf[160] = {0};
     int remaining = req->content_len;
-    if (remaining >= (int)sizeof(buf)) {
+    if (remaining < 0 || remaining >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
         return ESP_FAIL;
     }
 
     char target_client[CONFIG_STORE_CLIENT_NAME_MAX_LEN] = {0};
     if (remaining > 0) {
-        int ret = httpd_req_recv(req, buf, remaining);
+        int ret = recv_req_body_all(req, buf, sizeof(buf));
         if (ret > 0) {
-            buf[ret] = '\0';
             cJSON *root = cJSON_Parse(buf);
             if (root != NULL) {
                 cJSON *name_item = cJSON_GetObjectItem(root, "client_name");
@@ -531,6 +588,7 @@ static esp_err_t api_pair_delete_post_handler(httpd_req_t *req) {
 
 // GET /api/equipment - List all paired/connected BLE equipment across all slots
 static esp_err_t api_equipment_get_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     if (!verify_external_request_auth(req)) {
         httpd_resp_set_status(req, "401 Unauthorized");
         httpd_resp_set_type(req, "application/json");
@@ -567,6 +625,7 @@ static esp_err_t api_equipment_get_handler(httpd_req_t *req) {
 
 // POST /api/equipment/recipe - Dispatch Unified Recipe to any connected equipment (Boiler, Fermenter, Cooler)
 static esp_err_t api_equipment_recipe_post_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     if (!verify_external_request_auth(req)) {
         httpd_resp_set_status(req, "401 Unauthorized");
         httpd_resp_set_type(req, "application/json");
@@ -816,6 +875,7 @@ static bool parse_json_control_command(cJSON *root, g30_command_t *cmd) {
 
 // POST /api/equipment/control - Equipment-agnostic command endpoint
 static esp_err_t api_equipment_control_post_handler(httpd_req_t *req) {
+    set_cors_headers(req);
     if (!verify_external_request_auth(req)) {
         httpd_resp_set_status(req, "401 Unauthorized");
         httpd_resp_set_type(req, "application/json");
@@ -829,12 +889,11 @@ static esp_err_t api_equipment_control_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    int ret = httpd_req_recv(req, buf, remaining);
+    int ret = recv_req_body_all(req, buf, sizeof(buf));
     if (ret <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
         return ESP_FAIL;
     }
-    buf[ret] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -1855,7 +1914,7 @@ esp_err_t web_server_start(void) {
     config.server_port = WEB_SERVER_PORT;
     config.core_id = NETWORKING_TASK_CORE;
     config.stack_size = WEB_SERVER_STACK_SIZE;
-    config.max_uri_handlers = 40;
+    config.max_uri_handlers = 44;
     config.lru_purge_enable = true;
 
     ESP_LOGI(TAG, "Starting HTTP & WebSocket server on port %d...", config.server_port);
@@ -1957,6 +2016,28 @@ esp_err_t web_server_start(void) {
 
     httpd_uri_t uri_eq_control = {.uri = "/api/equipment/control", .method = HTTP_POST, .handler = api_equipment_control_post_handler};
     httpd_register_uri_handler(s_server, &uri_eq_control);
+
+    // CORS Preflight (OPTIONS) Handlers for External Browser Clients
+    httpd_uri_t uri_opt_claim = {.uri = "/api/pair/claim", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_claim);
+
+    httpd_uri_t uri_opt_pair_status = {.uri = "/api/pair/status", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_pair_status);
+
+    httpd_uri_t uri_opt_pair_start = {.uri = "/api/pair/start", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_pair_start);
+
+    httpd_uri_t uri_opt_pair_delete = {.uri = "/api/pair/delete", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_pair_delete);
+
+    httpd_uri_t uri_opt_eq_list = {.uri = "/api/equipment", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_eq_list);
+
+    httpd_uri_t uri_opt_eq_recipe = {.uri = "/api/equipment/recipe", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_eq_recipe);
+
+    httpd_uri_t uri_opt_eq_control = {.uri = "/api/equipment/control", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
+    httpd_register_uri_handler(s_server, &uri_opt_eq_control);
 
     // Full-Duplex Two-Way WebSocket Endpoint (/ws)
     httpd_uri_t uri_ws = {
