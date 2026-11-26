@@ -135,3 +135,18 @@ When sending telemetry via HTTP POST:
 *   `POST /api/ble/connect`: Accepts `{"addr":"...","addr_type":0}` and establishes BLE connection.
 *   `POST /api/ble/disconnect`: Accepts `{"conn_handle":X}` and terminates connection.
 *   `POST /api/system/restart`: Schedules a graceful gateway reboot.
+
+---
+
+## 6. Learned Gotchas: APSTA UDP Broadcasts & Dynamic MQTT Pairing
+
+*   **UDP Broadcast Routing in `WIFI_MODE_APSTA`**:
+    *   In LwIP with both STA (`WIFI_STA_DEF`) and SoftAP (`WIFI_AP_DEF`) active, an unbound socket sending to `255.255.255.255` (`INADDR_BROADCAST`) only exits the single default netif.
+    *   Always compute and send **subnet-directed broadcasts** (`(ip & netmask) | ~netmask` via `esp_netif_get_ip_info()`) for active interfaces (STA LAN and SoftAP `192.168.4.255` with matching interface IP in the payload) in addition to `255.255.255.255`.
+    *   Keep a **single FreeRTOS task** owning the LwIP UDP socket (wake it with `xTaskNotifyGive()` from other cores/tasks rather than calling `sendto()` across cores), check/log `sendto()` errors, and close the socket once the broadcast window ends.
+*   **Dynamic MQTT Pairing Refresh**:
+    *   When an external client pairs at runtime (`POST /api/pair/claim`), call `mqtt_manager_refresh_pairing_subscriptions()` immediately so the running MQTT client subscribes to the paired `brewlink/<topic_key>/<gateway_id>/...` command topics and republishes retained status/equipment sync without waiting for a reconnect or reboot.
+    *   Share one active gateway-level `mqtt_topic_key` across simultaneously paired clients (while issuing a unique per-client `api_token` for Bearer/HMAC-SHA256 auth) so pairing a second client does not break MQTT for already-paired clients; rotate `mqtt_topic_key` when all paired clients are deleted.
+*   **HTTP Request Body Reading & Startup Order**:
+    *   Always loop `httpd_req_recv()` until `req->content_len` bytes are received (handling `HTTPD_SOCK_ERR_TIMEOUT`) so TCP-fragmented JSON POST bodies do not fail with `400 Invalid JSON`.
+    *   Initialize `auth_manager_init()` **after** `esp_netif_init()`, `mqtt_manager_init()`, and `wifi_manager_init()` so its background monitor task never calls Wi-Fi/socket APIs before networking is ready.
