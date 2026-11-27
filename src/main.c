@@ -966,6 +966,9 @@ void app_main(void) {
     // 11. Start Embedded Web Configuration Server on port 80 (Core 0)
     ESP_ERROR_CHECK(web_server_start());
 
+    // 12. Schedule deferred OTA rollback confirmation only after full subsystem startup succeeds
+    ota_manager_schedule_boot_confirm();
+
     ESP_LOGI(TAG, "BrewLink Gateway initialization complete! Free Heap: %lu bytes",
              (unsigned long)esp_get_free_heap_size());
 }

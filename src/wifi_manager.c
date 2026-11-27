@@ -13,6 +13,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "config.h"
@@ -20,15 +21,72 @@
 
 static const char *TAG = "WIFI_MGR";
 
+#define WIFI_AP_IDLE_SHUTDOWN_US  (60LL * 1000000LL)
+
 static esp_netif_t *s_netif_sta = NULL;
 static esp_netif_t *s_netif_ap = NULL;
 
 static wifi_manager_sta_cb_t s_sta_callback = NULL;
 static SemaphoreHandle_t s_wifi_mutex = NULL;
+static esp_timer_handle_t s_ap_shutdown_timer = NULL;
 
 static wifi_mgr_status_t s_status;
 static int s_retry_count = 0;
 static bool s_scanning = false;
+
+static void ap_shutdown_timer_cb(void *arg) {
+    (void)arg;
+    bool should_disable = false;
+    bool retry_later = false;
+
+    if (xSemaphoreTake(s_wifi_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        if (s_status.sta_connected && s_status.ap_active) {
+            if (s_status.ap_clients_count == 0) {
+                should_disable = true;
+            } else {
+                retry_later = true;
+            }
+        }
+        xSemaphoreGive(s_wifi_mutex);
+    }
+
+    if (should_disable) {
+        if (esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK) {
+            if (xSemaphoreTake(s_wifi_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                s_status.ap_active = false;
+                xSemaphoreGive(s_wifi_mutex);
+            }
+            ESP_LOGI(TAG, "Station connected and idle -> disabled onboarding SoftAP for security");
+        }
+    } else if (retry_later && s_ap_shutdown_timer != NULL) {
+        esp_timer_start_once(s_ap_shutdown_timer, WIFI_AP_IDLE_SHUTDOWN_US);
+    }
+}
+
+static void schedule_ap_shutdown(void) {
+    if (s_ap_shutdown_timer != NULL) {
+        esp_timer_stop(s_ap_shutdown_timer);
+        esp_timer_start_once(s_ap_shutdown_timer, WIFI_AP_IDLE_SHUTDOWN_US);
+    }
+}
+
+esp_err_t wifi_manager_enable_setup_ap(void) {
+    if (s_ap_shutdown_timer != NULL) {
+        esp_timer_stop(s_ap_shutdown_timer);
+    }
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err == ESP_OK && s_wifi_mutex != NULL &&
+        xSemaphoreTake(s_wifi_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        s_status.ap_active = true;
+        bool sta_conn = s_status.sta_connected;
+        xSemaphoreGive(s_wifi_mutex);
+        ESP_LOGI(TAG, "Setup SoftAP '%s' enabled (WPA2-PSK)", s_status.ap_ssid);
+        if (sta_conn) {
+            schedule_ap_shutdown();
+        }
+    }
+    return err;
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
@@ -68,8 +126,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                     ESP_LOGI(TAG, "Retrying Wi-Fi connection (%d/%d)...", s_retry_count, WIFI_STA_MAX_RETRIES);
                     esp_wifi_connect();
                 } else {
-                    ESP_LOGW(TAG, "Exceeded max Wi-Fi reconnect attempts (%d). SoftAP '%s' is broadcasting for setup.",
+                    ESP_LOGW(TAG, "Exceeded max Wi-Fi reconnect attempts (%d). Re-enabling SoftAP '%s' for setup.",
                              WIFI_STA_MAX_RETRIES, s_status.ap_ssid);
+                    wifi_manager_enable_setup_ap();
                 }
                 break;
             }
@@ -124,6 +183,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             if (s_sta_callback != NULL) {
                 s_sta_callback(true, ip_str);
             }
+            schedule_ap_shutdown();
         }
     }
 }
@@ -138,11 +198,19 @@ esp_err_t wifi_manager_init(wifi_manager_sta_cb_t sta_cb) {
 
     memset(&s_status, 0, sizeof(s_status));
 
-    // Determine SoftAP SSID with MAC suffix: "BrewLink-Setup-XXXX"
+    const esp_timer_create_args_t ap_timer_args = {
+        .callback = ap_shutdown_timer_cb,
+        .name = "wifi_ap_idle",
+    };
+    esp_timer_create(&ap_timer_args, &s_ap_shutdown_timer);
+
+    // Determine SoftAP SSID & WPA2-PSK passphrase with MAC suffix
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(s_status.ap_ssid, sizeof(s_status.ap_ssid), "%s-%02X%02X",
              WIFI_AP_SSID_PREFIX, mac[4], mac[5]);
+    snprintf(s_status.ap_password, sizeof(s_status.ap_password), "brewlink-%02X%02X",
+             mac[4], mac[5]);
     strncpy(s_status.ap_ip, "192.168.4.1", sizeof(s_status.ap_ip) - 1);
 
     // Initialize Station and AP network interfaces
@@ -161,16 +229,17 @@ esp_err_t wifi_manager_init(wifi_manager_sta_cb_t sta_cb) {
     brewlink_config_t stored_cfg;
     config_store_get(&stored_cfg);
 
-    // Prepare SoftAP configuration
+    // Prepare WPA2-PSK SoftAP configuration
     wifi_config_t ap_config;
     memset(&ap_config, 0, sizeof(ap_config));
     strncpy((char *)ap_config.ap.ssid, s_status.ap_ssid, sizeof(ap_config.ap.ssid) - 1);
     ap_config.ap.ssid_len = strlen(s_status.ap_ssid);
+    strncpy((char *)ap_config.ap.password, s_status.ap_password, sizeof(ap_config.ap.password) - 1);
     ap_config.ap.channel = WIFI_AP_CHANNEL;
     ap_config.ap.max_connection = WIFI_AP_MAX_CONN;
-    ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
 
-    // Use APSTA mode so AP is always available for onboarding/configuration
+    // Start in APSTA for onboarding; SoftAP automatically turns off 60s after STA connects
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     s_status.ap_active = true;
@@ -180,17 +249,19 @@ esp_err_t wifi_manager_init(wifi_manager_sta_cb_t sta_cb) {
         memset(&sta_config, 0, sizeof(sta_config));
         strncpy((char *)sta_config.sta.ssid, stored_cfg.wifi_ssid, sizeof(sta_config.sta.ssid) - 1);
         strncpy((char *)sta_config.sta.password, stored_cfg.wifi_password, sizeof(sta_config.sta.password) - 1);
-        sta_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+        sta_config.sta.threshold.authmode = (stored_cfg.wifi_password[0] != '\0')
+                                            ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
         strncpy(s_status.sta_ssid, stored_cfg.wifi_ssid, sizeof(s_status.sta_ssid) - 1);
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
         ESP_LOGI(TAG, "Configured Station for SSID: '%s'", s_status.sta_ssid);
     } else {
-        ESP_LOGI(TAG, "No Wi-Fi credentials found. SoftAP '%s' active for onboarding at 192.168.4.1", s_status.ap_ssid);
+        ESP_LOGI(TAG, "No Wi-Fi credentials found. SoftAP '%s' (WPA2-PSK: %s) active at 192.168.4.1",
+                 s_status.ap_ssid, s_status.ap_password);
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "Wi-Fi subsystem initialized. SoftAP '%s' is broadcasting.", s_status.ap_ssid);
+    ESP_LOGI(TAG, "Wi-Fi subsystem initialized. SoftAP '%s' (WPA2-PSK) broadcasting.", s_status.ap_ssid);
 
     return ESP_OK;
 }
@@ -400,7 +471,8 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password) {
     if (password != NULL) {
         strncpy((char *)sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
     }
-    sta_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    sta_config.sta.threshold.authmode = (password != NULL && password[0] != '\0')
+                                        ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
     if (xSemaphoreTake(s_wifi_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         strncpy(s_status.sta_ssid, ssid, sizeof(s_status.sta_ssid) - 1);

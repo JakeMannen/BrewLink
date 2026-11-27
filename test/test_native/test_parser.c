@@ -1619,11 +1619,13 @@ void test_ota_parse_github_release_json(void) {
         "\"html_url\":\"https://github.com/JakeMannen/BrewLink/releases/tag/v0.3.0\","
         "\"body\":\"## Highlights\\nAdded Web UI OTA updates\","
         "\"assets\":["
-        "  {\"name\":\"brewlink-esp32dev-v0.3.0-bootloader.bin\",\"size\":26000,\"browser_download_url\":\"https://example.com/bootloader.bin\"},"
-        "  {\"name\":\"brewlink-esp32dev-v0.3.0-factory.bin\",\"size\":1380000,\"browser_download_url\":\"https://example.com/factory.bin\"},"
-        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.bin\",\"size\":1310720,\"browser_download_url\":\"https://example.com/firmware.bin\"},"
-        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.elf\",\"size\":8900000,\"browser_download_url\":\"https://example.com/firmware.elf\"},"
-        "  {\"name\":\"brewlink-esp32dev-v0.3.0.zip\",\"size\":2400000,\"browser_download_url\":\"https://example.com/bundle.zip\"}"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-bootloader.bin\",\"size\":26000,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/bootloader.bin\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-factory.bin\",\"size\":1380000,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/factory.bin\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.bin\",\"size\":1310720,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/firmware.bin\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.bin.sig\",\"size\":72,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/firmware.bin.sig\"},"
+        "  {\"name\":\"SHA256SUMS.txt\",\"size\":512,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/SHA256SUMS.txt\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0-firmware.elf\",\"size\":8900000,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/firmware.elf\"},"
+        "  {\"name\":\"brewlink-esp32dev-v0.3.0.zip\",\"size\":2400000,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/bundle.zip\"}"
         "]"
         "}";
 
@@ -1636,7 +1638,9 @@ void test_ota_parse_github_release_json(void) {
     TEST_ASSERT_EQUAL_STRING("0.3.0", rel.version);
     TEST_ASSERT_EQUAL_STRING("BrewLink v0.3.0 Release", rel.release_name);
     TEST_ASSERT_EQUAL_STRING("brewlink-esp32dev-v0.3.0-firmware.bin", rel.asset_name);
-    TEST_ASSERT_EQUAL_STRING("https://example.com/firmware.bin", rel.download_url);
+    TEST_ASSERT_EQUAL_STRING("https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/firmware.bin", rel.download_url);
+    TEST_ASSERT_EQUAL_STRING("https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/firmware.bin.sig", rel.sig_download_url);
+    TEST_ASSERT_EQUAL_STRING("https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/SHA256SUMS.txt", rel.sha256sums_url);
     TEST_ASSERT_EQUAL_UINT32(1310720U, (uint32_t)rel.asset_size);
 
     // Same running version -> update_available is false
@@ -1647,12 +1651,105 @@ void test_ota_parse_github_release_json(void) {
     // Fallback to -factory.bin if -firmware.bin is omitted
     const char *factory_only_json =
         "{\"tag_name\":\"v0.4.0\",\"assets\":["
-        "{\"name\":\"brewlink-esp32dev-v0.4.0.zip\",\"size\":100,\"browser_download_url\":\"https://example.com/b.zip\"},"
-        "{\"name\":\"brewlink-esp32dev-v0.4.0-factory.bin\",\"size\":1400000,\"browser_download_url\":\"https://example.com/factory.bin\"}"
+        "{\"name\":\"brewlink-esp32dev-v0.4.0.zip\",\"size\":100,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.4.0/b.zip\"},"
+        "{\"name\":\"brewlink-esp32dev-v0.4.0-factory.bin\",\"size\":1400000,\"browser_download_url\":\"https://github.com/JakeMannen/BrewLink/releases/download/v0.4.0/factory.bin\"}"
         "]}";
     TEST_ASSERT_EQUAL_INT(ESP_OK, ota_parse_github_release_json(factory_only_json, "0.3.0", &rel));
     TEST_ASSERT_EQUAL_STRING("brewlink-esp32dev-v0.4.0-factory.bin", rel.asset_name);
     TEST_ASSERT_TRUE(rel.update_available);
+}
+
+void test_ota_status_fields_and_async_check_api(void) {
+    ota_status_t st;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_manager_get_status(&st));
+    TEST_ASSERT_EQUAL_INT(OTA_STATE_IDLE, st.state);
+    TEST_ASSERT_FALSE(st.gateway_reachable);
+    TEST_ASSERT_EQUAL_UINT32(0U, st.check_seq);
+    TEST_ASSERT_EQUAL_STRING(BREWLINK_FIRMWARE_VERSION, st.current_version);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_manager_start_release_check(NULL));
+}
+
+void test_ota_url_allowlist_and_ssrf_blocking(void) {
+    // Valid official API and download CDN URLs
+    TEST_ASSERT_TRUE(ota_validate_github_url(BREWLINK_GITHUB_RELEASES_API_URL, true));
+    TEST_ASSERT_TRUE(ota_validate_github_url("https://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/fw.bin", false));
+    TEST_ASSERT_TRUE(ota_validate_github_url("https://objects.githubusercontent.com/github-production-release-asset-2e65be/123?sig=abc", false));
+    TEST_ASSERT_TRUE(ota_validate_github_url("https://release-assets.githubusercontent.com/asset/123", false));
+
+    // Reject HTTP cleartext downgrade, SSRF, arbitrary hosts, userinfo, ports, traversal, javascript:
+    TEST_ASSERT_FALSE(ota_validate_github_url("http://github.com/JakeMannen/BrewLink/releases/download/v0.3.0/fw.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("http://api.github.com/repos/JakeMannen/BrewLink/releases/latest", true));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://192.168.1.1/evil.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("http://192.168.4.2/evil.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://attacker.example.com/fw.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://github.com/OtherUser/BrewLink/releases/download/v1.0.0/fw.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://api.github.com/repos/OtherUser/BrewLink/releases/latest", true));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://github.com@attacker.com/JakeMannen/BrewLink/fw.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://github.com:8443/JakeMannen/BrewLink/fw.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("https://github.com/JakeMannen/BrewLink/../Other/fw.bin", false));
+    TEST_ASSERT_FALSE(ota_validate_github_url("javascript:alert(1)", false));
+}
+
+void test_ota_parse_rejects_truncated_json_and_malicious_urls(void) {
+    ota_release_info_t rel;
+    // Truncated JSON without closing '}' must be rejected
+    const char *trunc = "{\"tag_name\":\"v0.5.0\",\"name\":\"Truncated\"";
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_RESPONSE, ota_parse_github_release_json(trunc, "0.2.0", &rel));
+
+    // Malformed \u escape followed by quote must be rejected
+    const char *bad_u = "{\"tag_name\":\"v0.5\\u\"0\"}";
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_RESPONSE, ota_parse_github_release_json(bad_u, "0.2.0", &rel));
+
+    // Malicious javascript: html_url and off-origin download URL must be stripped
+    const char *poison =
+        "{\"tag_name\":\"v0.5.0\",\"html_url\":\"javascript:alert(1)\","
+        "\"assets\":[{\"name\":\"brewlink-esp32dev-v0.5.0-firmware.bin\",\"size\":1000,"
+        "\"browser_download_url\":\"http://192.168.4.2/evil.bin\"}]}";
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_parse_github_release_json(poison, "0.2.0", &rel));
+    TEST_ASSERT_EQUAL_STRING("", rel.html_url);
+    TEST_ASSERT_EQUAL_STRING("", rel.download_url);
+    TEST_ASSERT_FALSE(rel.available);
+}
+
+void test_ota_rejects_missing_sha256_hash_and_parses_sha256sums(void) {
+    uint8_t img[512];
+    size_t img_len = build_synthetic_esp32_image(img, sizeof(img), "0.3.0", "BrewLink",
+                                                 OTA_CHIP_ID_ESP32, false);
+    TEST_ASSERT_GREATER_THAN(OTA_MIN_IMAGE_HEADER_SIZE, img_len);
+    ota_image_info_t info;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, ota_verify_firmware_header(img, img_len, &info));
+
+    const char *sums =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  brewlink-esp32dev-v0.3.0-factory.bin\n"
+        "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789 *brewlink-esp32dev-v0.3.0-firmware.bin\n";
+    char hex_out[OTA_SHA256_HEX_LEN + 1] = {0};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, ota_parse_sha256sums(sums, "brewlink-esp32dev-v0.3.0-firmware.bin", hex_out));
+    TEST_ASSERT_EQUAL_STRING("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", hex_out);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, ota_parse_sha256sums(sums, "nonexistent.bin", hex_out));
+}
+
+void test_auth_ota_unlock_window_lifecycle(void) {
+    s_mock_time_ms = 5000;
+    s_ota_unlocked = false;
+    s_ota_unlock_expires_at_ms = 0;
+
+    TEST_ASSERT_FALSE(auth_manager_is_ota_unlocked());
+
+    uint32_t ttl = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_unlock_ota(&ttl));
+    TEST_ASSERT_EQUAL_UINT32(AUTH_OTA_UNLOCK_WINDOW_SEC, ttl);
+    TEST_ASSERT_TRUE(auth_manager_is_ota_unlocked());
+
+    bool unlocked = false;
+    uint32_t rem = 0;
+    s_mock_time_ms += 20000;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, auth_manager_get_ota_unlock_status(&unlocked, &rem));
+    TEST_ASSERT_TRUE(unlocked);
+    TEST_ASSERT_EQUAL_UINT32(AUTH_OTA_UNLOCK_WINDOW_SEC - 20, rem);
+
+    // Advance past 120s window -> auto-locks
+    s_mock_time_ms += (AUTH_OTA_UNLOCK_WINDOW_SEC * 1000UL);
+    TEST_ASSERT_FALSE(auth_manager_is_ota_unlocked());
 }
 
 // =============================================================================
@@ -1727,6 +1824,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_ota_verify_merged_factory_bin_extraction);
     RUN_TEST(test_ota_rejects_invalid_and_wrong_release_files);
     RUN_TEST(test_ota_parse_github_release_json);
+    RUN_TEST(test_ota_status_fields_and_async_check_api);
+    RUN_TEST(test_ota_url_allowlist_and_ssrf_blocking);
+    RUN_TEST(test_ota_parse_rejects_truncated_json_and_malicious_urls);
+    RUN_TEST(test_ota_rejects_missing_sha256_hash_and_parses_sha256sums);
+    RUN_TEST(test_auth_ota_unlock_window_lifecycle);
 
     return UNITY_END();
 }
