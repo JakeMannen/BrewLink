@@ -72,9 +72,13 @@ extern "C" {
 #define OTA_CHIP_ID_ESP32           0x0000U
 #define OTA_EXPECTED_PROJECT_NAME   "BrewLink"
 
-#define OTA_TASK_STACK_SIZE         8192
+#define OTA_TASK_STACK_SIZE         10240
 #define OTA_TASK_PRIORITY           5
 #define OTA_HTTP_TIMEOUT_MS         20000
+#define OTA_CHECK_COOLDOWN_SEC      10
+#define OTA_BOOT_CONFIRM_DELAY_SEC  15
+#define OTA_MAX_SIG_BYTES           128U
+#define OTA_SHA256_HEX_LEN          64U
 
 /**
  * @brief Detected firmware upload / release file format.
@@ -136,6 +140,8 @@ typedef struct {
     char html_url[OTA_URL_MAX_LEN];
     char asset_name[OTA_ASSET_NAME_MAX_LEN];
     char download_url[OTA_URL_MAX_LEN];
+    char sig_download_url[OTA_URL_MAX_LEN];
+    char sha256sums_url[OTA_URL_MAX_LEN];
     size_t asset_size;
     char notes[OTA_NOTES_MAX_LEN];
 } ota_release_info_t;
@@ -155,6 +161,10 @@ typedef struct {
     char last_error[OTA_MESSAGE_MAX_LEN];
     ota_release_info_t latest_release;
     int64_t last_check_time_s;
+    bool gateway_reachable;
+    uint32_t check_seq;
+    bool signature_required;
+    bool reboot_deferred;
 } ota_status_t;
 
 // =============================================================================
@@ -202,8 +212,29 @@ esp_err_t ota_verify_firmware_header(const uint8_t *data, size_t len, ota_image_
 esp_err_t ota_verify_full_image_integrity(const uint8_t *data, size_t len, ota_image_info_t *out_info);
 
 /**
+ * @brief Validate that a URL uses strictly HTTPS and points to an allowlisted GitHub/CDN host
+ *        for the configured BrewLink repository (blocks HTTP downgrade, SSRF, and javascript: URIs).
+ * @param url Candidate URL string.
+ * @param is_api_url True for GitHub Releases API URLs (api.github.com/repos/<repo>/...),
+ *                   false for release web/asset download URLs (github.com/<repo>/... or GitHub CDN).
+ */
+bool ota_validate_github_url(const char *url, bool is_api_url);
+
+/**
+ * @brief Extract the expected 64-char lowercase SHA-256 hex digest for @p asset_name from SHA256SUMS.txt.
+ */
+esp_err_t ota_parse_sha256sums(const char *sums_text, const char *asset_name,
+                               char out_hex[OTA_SHA256_HEX_LEN + 1]);
+
+/**
+ * @brief Return true when an embedded ECDSA-P256 public signing key is configured.
+ */
+bool ota_manager_is_signature_required(void);
+
+/**
  * @brief Parse a GitHub Releases API JSON response object (`releases/latest`) and select the
- *        preferred OTA asset (`*-firmware.bin`, falling back to `*-factory.bin`).
+ *        preferred OTA asset (`*-firmware.bin`, falling back to `*-factory.bin`), plus optional
+ *        matching `.sig` and `SHA256SUMS.txt` assets.
  */
 esp_err_t ota_parse_github_release_json(const char *json_str, const char *current_ver,
                                         ota_release_info_t *out_release);
@@ -213,10 +244,16 @@ esp_err_t ota_parse_github_release_json(const char *json_str, const char *curren
 // =============================================================================
 
 /**
- * @brief Initialize the OTA manager, record running app version/partition, and mark current
- *        slot valid if pending verification after an OTA reboot.
+ * @brief Initialize the OTA manager and record running app version/partition.
+ * @note Does NOT immediately cancel bootloader rollback; call ota_manager_schedule_boot_confirm()
+ *       only after BLE, Wi-Fi, MQTT, and Web Server initialization have succeeded.
  */
 esp_err_t ota_manager_init(void);
+
+/**
+ * @brief Schedule deferred bootloader rollback confirmation (15s after full startup succeeds).
+ */
+esp_err_t ota_manager_schedule_boot_confirm(void);
 
 /**
  * @brief Return the current running BrewLink firmware version string.
@@ -235,15 +272,36 @@ esp_err_t ota_manager_get_status(ota_status_t *out_status);
 
 /**
  * @brief Query GitHub Releases over HTTPS (using mbedTLS cert bundle) and cache latest release info.
- * @param releases_url Custom API URL or NULL to use BREWLINK_GITHUB_RELEASES_API_URL.
+ * @param releases_url Must be NULL (uses BREWLINK_GITHUB_RELEASES_API_URL) or an allowlisted GitHub API URL.
  */
 esp_err_t ota_manager_check_github_release(const char *releases_url, ota_release_info_t *out_release);
 
 /**
+ * @brief Spawn a Core 0 background task to query GitHub Releases over HTTPS without blocking httpd.
+ * @param releases_url Must be NULL (uses BREWLINK_GITHUB_RELEASES_API_URL) or an allowlisted GitHub API URL.
+ */
+esp_err_t ota_manager_start_release_check(const char *releases_url);
+
+/**
  * @brief Spawn a Core 0 background task to download a release binary from @p download_url,
- *        stream it into the next OTA partition, verify integrity, set boot partition, and reboot.
+ *        stream it into the next OTA partition, verify integrity/signature, set boot partition, and reboot.
  */
 esp_err_t ota_manager_start_remote_update(const char *download_url);
+
+/**
+ * @brief Extended remote OTA launcher supporting G30-safe deferred reboot and explicit downgrade flag.
+ */
+esp_err_t ota_manager_start_remote_update_ex(const char *download_url, bool force_reboot, bool allow_downgrade);
+
+/**
+ * @brief Attach an ECDSA-P256 DER signature to the active/next manual firmware upload session.
+ */
+esp_err_t ota_manager_set_upload_signature(const uint8_t *sig_der, size_t sig_len);
+
+/**
+ * @brief Configure whether the next manual upload session permits downgrading to an older SemVer.
+ */
+esp_err_t ota_manager_set_allow_downgrade(bool allow);
 
 /**
  * @brief Begin a streaming manual firmware upload session into the inactive OTA partition.

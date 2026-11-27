@@ -54,6 +54,7 @@ typedef struct {
     bool    ap_active;
     char    ap_ssid[WIFI_MGR_SSID_MAX_LEN];
     char    ap_ip[WIFI_MGR_IP_STR_MAX_LEN];
+    char    ap_password[24];
     uint8_t ap_clients_count;
 } wifi_mgr_status_t;
 
@@ -115,6 +116,12 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password);
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_status is NULL.
  */
 esp_err_t wifi_manager_get_status(wifi_mgr_status_t *out_status);
+
+/**
+ * @brief Re-enable the WPA2-protected onboarding SoftAP (e.g. via physical BOOT button)
+ * @return ESP_OK on success, or ESP error code.
+ */
+esp_err_t wifi_manager_enable_setup_ap(void);
 
 #ifdef __cplusplus
 }

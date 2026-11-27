@@ -257,6 +257,7 @@ jobs:
       - name: Package Versioned Firmware Files
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          OTA_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.OTA_SIGNING_PRIVATE_KEY_PEM }}
         run: |
           set -euo pipefail
 
@@ -332,6 +333,26 @@ jobs:
             0x8000 "${BUILD_DIR}/partitions.bin" \
             0x10000 "${OUT_DIR}/${PREFIX}-firmware.bin"
 
+          # Sign firmware binaries with ECDSA-P256-SHA256 if repository signing key secret is configured
+          SIG_FILES=()
+          if [ -n "${OTA_SIGNING_PRIVATE_KEY_PEM:-}" ]; then
+            KEY_FILE=$(mktemp)
+            trap 'rm -f "$KEY_FILE"' EXIT
+            chmod 600 "$KEY_FILE"
+            printf '%s\n' "$OTA_SIGNING_PRIVATE_KEY_PEM" > "$KEY_FILE"
+            openssl dgst -sha256 -sign "$KEY_FILE" \
+              -out "${OUT_DIR}/${PREFIX}-firmware.bin.sig" \
+              "${OUT_DIR}/${PREFIX}-firmware.bin"
+            openssl dgst -sha256 -sign "$KEY_FILE" \
+              -out "${OUT_DIR}/${PREFIX}-factory.bin.sig" \
+              "${OUT_DIR}/${PREFIX}-factory.bin"
+            rm -f "$KEY_FILE"
+            SIG_FILES=("${PREFIX}-firmware.bin.sig" "${PREFIX}-factory.bin.sig")
+            echo "Signed firmware & factory binaries with ECDSA-P256-SHA256."
+          else
+            echo "Note: OTA_SIGNING_PRIVATE_KEY_PEM secret not set; skipping .sig generation."
+          fi
+
           # Create complete release bundle zip
           (
             cd "$OUT_DIR"
@@ -339,7 +360,8 @@ jobs:
                                 "${PREFIX}-firmware.bin" \
                                 "${PREFIX}-bootloader.bin" \
                                 "${PREFIX}-partitions.bin" \
-                                "${PREFIX}-firmware.elf"
+                                "${PREFIX}-firmware.elf" \
+                                "${SIG_FILES[@]}"
           )
 
           # Generate SHA-256 checksums for all firmware release files
@@ -350,6 +372,7 @@ jobs:
                       "${PREFIX}-bootloader.bin" \
                       "${PREFIX}-partitions.bin" \
                       "${PREFIX}-firmware.elf" \
+                      "${SIG_FILES[@]}" \
                       "${PREFIX}.zip" > SHA256SUMS.txt
           )
 

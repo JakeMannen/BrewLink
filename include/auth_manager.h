@@ -37,6 +37,7 @@ extern "C" {
 
 #define AUTH_PAIRING_PIN_LEN            6
 #define AUTH_PAIRING_WINDOW_SEC         60
+#define AUTH_OTA_UNLOCK_WINDOW_SEC      120
 #define AUTH_BOOT_BTN_HOLD_MS           3000
 #define AUTH_HMAC_HEX_LEN               64
 #define AUTH_DISCOVERY_UDP_PORT         53540
@@ -165,6 +166,26 @@ bool auth_manager_verify_mqtt_command(const char *req_id,
                                       uint32_t timestamp,
                                       const char *signature_hex,
                                       const char *plain_token);
+
+/**
+ * @brief Open a 120-second physical-presence OTA unlock window (triggered by BOOT button hold)
+ * @param[out] out_ttl_sec Optional pointer to receive window duration in seconds
+ * @return ESP_OK on success
+ */
+esp_err_t auth_manager_unlock_ota(uint32_t *out_ttl_sec);
+
+/**
+ * @brief Query whether the physical-presence OTA unlock window is currently open
+ * @param[out] out_unlocked True if OTA flashing is currently unlocked
+ * @param[out] out_remaining_sec Optional remaining seconds in the unlock window
+ * @return ESP_OK on success
+ */
+esp_err_t auth_manager_get_ota_unlock_status(bool *out_unlocked, uint32_t *out_remaining_sec);
+
+/**
+ * @brief Convenience check returning true if physical-presence OTA unlock is active
+ */
+bool auth_manager_is_ota_unlocked(void);
 
 /**
  * @brief Override active token and pairing state in memory (used by native unit tests)

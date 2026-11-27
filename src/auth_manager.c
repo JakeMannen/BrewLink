@@ -34,6 +34,8 @@ static uint32_t s_mock_rand_seed = 0x12345678;
 static char     s_active_pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
 static uint32_t s_pin_expires_at_ms = 0;
 static bool     s_window_open = false;
+static uint32_t s_ota_unlock_expires_at_ms = 0;
+static bool     s_ota_unlocked = false;
 
 static char     s_test_api_token[CONFIG_STORE_TOKEN_MAX_LEN] = {0};
 static char     s_test_topic_key[CONFIG_STORE_TOPIC_KEY_MAX_LEN] = {0};
@@ -946,6 +948,66 @@ bool auth_manager_verify_mqtt_command(const char *req_id,
     return true;
 }
 
+esp_err_t auth_manager_unlock_ota(uint32_t *out_ttl_sec) {
+#ifdef ESP_PLATFORM
+    if (s_auth_mutex != NULL) {
+        xSemaphoreTake(s_auth_mutex, pdMS_TO_TICKS(200));
+    }
+#endif
+
+    s_ota_unlocked = true;
+    s_ota_unlock_expires_at_ms = get_now_ms() + (AUTH_OTA_UNLOCK_WINDOW_SEC * 1000UL);
+
+#ifdef ESP_PLATFORM
+    if (s_auth_mutex != NULL) {
+        xSemaphoreGive(s_auth_mutex);
+    }
+    ESP_LOGI(TAG, "Physical presence confirmed -> OTA flashing unlocked for %d seconds",
+             AUTH_OTA_UNLOCK_WINDOW_SEC);
+#endif
+
+    if (out_ttl_sec != NULL) {
+        *out_ttl_sec = AUTH_OTA_UNLOCK_WINDOW_SEC;
+    }
+    return ESP_OK;
+}
+
+esp_err_t auth_manager_get_ota_unlock_status(bool *out_unlocked, uint32_t *out_remaining_sec) {
+#ifdef ESP_PLATFORM
+    if (s_auth_mutex != NULL) {
+        xSemaphoreTake(s_auth_mutex, pdMS_TO_TICKS(200));
+    }
+#endif
+
+    uint32_t now = get_now_ms();
+    if (s_ota_unlocked && (int32_t)(s_ota_unlock_expires_at_ms - now) <= 0) {
+        s_ota_unlocked = false;
+        s_ota_unlock_expires_at_ms = 0;
+    }
+
+    if (out_unlocked != NULL) {
+        *out_unlocked = s_ota_unlocked;
+    }
+    if (out_remaining_sec != NULL) {
+        *out_remaining_sec = s_ota_unlocked
+                             ? (uint32_t)((s_ota_unlock_expires_at_ms - now) / 1000UL)
+                             : 0;
+    }
+
+#ifdef ESP_PLATFORM
+    if (s_auth_mutex != NULL) {
+        xSemaphoreGive(s_auth_mutex);
+    }
+#endif
+    return ESP_OK;
+}
+
+bool auth_manager_is_ota_unlocked(void) {
+    bool unlocked = false;
+    auth_manager_get_ota_unlock_status(&unlocked, NULL);
+    return unlocked;
+}
+
 #ifdef ESP_PLATFORM
 // Background task on Core 1 polling GPIO 0 (BOOT button) for 3-second hold and broadcasting UDP/MQTT pairing beacons
 #define BOOT_BUTTON_GPIO    GPIO_NUM_0
@@ -975,8 +1037,14 @@ static void boot_button_monitor_task(void *pvParameters) {
                 hold_start_ms = now_ms;
             } else if (!triggered && (uint32_t)(now_ms - hold_start_ms) >= AUTH_BOOT_BTN_HOLD_MS) {
                 triggered = true;
-                ESP_LOGI(TAG, "BOOT button held for 3s -> activating 60s Pairing Broadcast Mode!");
+                ESP_LOGI(TAG, "BOOT button held for 3s -> activating 60s Pairing Broadcast & 120s OTA Unlock!");
                 auth_manager_start_pairing(NULL, NULL);
+                auth_manager_unlock_ota(NULL);
+                wifi_mgr_status_t wstat;
+                memset(&wstat, 0, sizeof(wstat));
+                if (wifi_manager_get_status(&wstat) == ESP_OK && !wstat.ap_active) {
+                    wifi_manager_enable_setup_ap();
+                }
             }
         } else {
             holding = false;

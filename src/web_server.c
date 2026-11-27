@@ -80,6 +80,170 @@ static esp_err_t api_cors_options_handler(httpd_req_t *req) {
     return httpd_resp_send(req, NULL, 0);
 }
 
+// Bound JSON nesting depth before calling cJSON_Parse to prevent httpd stack overflow
+static bool safe_json_nesting_ok(const char *str, int max_depth) {
+    if (!str) return false;
+    int depth = 0;
+    bool in_str = false;
+    bool esc = false;
+    for (const char *p = str; *p != '\0'; p++) {
+        if (in_str) {
+            if (esc) {
+                esc = false;
+            } else if (*p == '\\') {
+                esc = true;
+            } else if (*p == '"') {
+                in_str = false;
+            }
+            continue;
+        }
+        if (*p == '"') {
+            in_str = true;
+        } else if (*p == '{' || *p == '[') {
+            depth++;
+            if (depth > max_depth) {
+                return false;
+            }
+        } else if (*p == '}' || *p == ']') {
+            if (depth > 0) depth--;
+        }
+    }
+    return true;
+}
+
+static bool host_matches_gateway(const char *host_hdr) {
+    if (!host_hdr || host_hdr[0] == '\0') {
+        return false;
+    }
+    char host_only[64] = {0};
+    const char *colon = strchr(host_hdr, ':');
+    size_t hlen = colon ? (size_t)(colon - host_hdr) : strlen(host_hdr);
+    if (hlen == 0 || hlen >= sizeof(host_only)) {
+        return false;
+    }
+    memcpy(host_only, host_hdr, hlen);
+    host_only[hlen] = '\0';
+
+    if (strcmp(host_only, "192.168.4.1") == 0) {
+        return true;
+    }
+
+    wifi_mgr_status_t wstat;
+    memset(&wstat, 0, sizeof(wstat));
+    if (wifi_manager_get_status(&wstat) == ESP_OK &&
+        wstat.sta_ip[0] != '\0' && strcmp(host_only, wstat.sta_ip) == 0) {
+        return true;
+    }
+
+    // Allow mDNS local hostname (e.g. brewlink.local)
+    if (strncasecmp(host_only, "brewlink", 8) == 0) {
+        size_t l = strlen(host_only);
+        if (l > 6 && strcasecmp(host_only + l - 6, ".local") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Protect local Web UI state-changing endpoints against CSRF and DNS rebinding
+static bool verify_local_ui_request(httpd_req_t *req, bool require_json_ct) {
+    char host_hdr[64] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Host", host_hdr, sizeof(host_hdr)) != ESP_OK ||
+        !host_matches_gateway(host_hdr)) {
+        ESP_LOGW(TAG, "Rejected request with invalid Host header: '%s'", host_hdr);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Invalid Host header\"}", HTTPD_RESP_USE_STRLEN);
+        return false;
+    }
+
+    char origin_hdr[96] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Origin", origin_hdr, sizeof(origin_hdr)) == ESP_OK &&
+        origin_hdr[0] != '\0') {
+        char expected_http[80];
+        char expected_https[80];
+        snprintf(expected_http, sizeof(expected_http), "http://%s", host_hdr);
+        snprintf(expected_https, sizeof(expected_https), "https://%s", host_hdr);
+        if (strcasecmp(origin_hdr, expected_http) != 0 &&
+            strcasecmp(origin_hdr, expected_https) != 0) {
+            ESP_LOGW(TAG, "Rejected cross-origin request: Origin='%s' Host='%s'", origin_hdr, host_hdr);
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Cross-origin request forbidden\"}", HTTPD_RESP_USE_STRLEN);
+            return false;
+        }
+    }
+
+    char xreq[16] = {0};
+    bool has_custom_hdr = (httpd_req_get_hdr_value_str(req, "X-BrewLink-Req", xreq, sizeof(xreq)) == ESP_OK &&
+                           strcmp(xreq, "1") == 0);
+
+    char ct[64] = {0};
+    bool has_ct = (httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof(ct)) == ESP_OK);
+    if (require_json_ct && req->content_len > 0) {
+        if (!has_ct || strncasecmp(ct, "application/json", 16) != 0) {
+            httpd_resp_set_status(req, "415 Unsupported Media Type");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Content-Type must be application/json\"}", HTTPD_RESP_USE_STRLEN);
+            return false;
+        }
+    } else if (!has_custom_hdr) {
+        // Without custom header (which triggers CORS preflight), reject CORS simple content types
+        if (has_ct &&
+            (strncasecmp(ct, "text/plain", 10) == 0 ||
+             strncasecmp(ct, "multipart/form-data", 19) == 0 ||
+             strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0)) {
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Missing X-BrewLink-Req header\"}", HTTPD_RESP_USE_STRLEN);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Require physical BOOT-button presence (120s OTA unlock window) or valid paired Bearer api_token
+static bool verify_ota_authorization(httpd_req_t *req) {
+    if (auth_manager_is_ota_unlocked()) {
+        return true;
+    }
+
+    char hdr_buf[128] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr_buf, sizeof(hdr_buf)) == ESP_OK &&
+        auth_manager_verify_token(hdr_buf)) {
+        return true;
+    }
+    if (httpd_req_get_hdr_value_str(req, "X-BrewLink-Token", hdr_buf, sizeof(hdr_buf)) == ESP_OK &&
+        auth_manager_verify_token(hdr_buf)) {
+        return true;
+    }
+
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(
+        req,
+        "{\"status\":\"error\",\"error_code\":\"OTA_LOCKED\","
+        "\"error\":\"OTA flashing is locked. Press and hold the physical BOOT button on the ESP32 for 3 seconds to unlock (120s window).\"}",
+        HTTPD_RESP_USE_STRLEN
+    );
+    return false;
+}
+
+static size_t decode_hex_bytes(const char *hex_str, uint8_t *out, size_t max_out) {
+    if (!hex_str || !out || max_out == 0) return 0;
+    size_t slen = strlen(hex_str);
+    if (slen == 0 || (slen % 2U) != 0U || (slen / 2U) > max_out) return 0;
+    for (size_t i = 0; i < slen; i += 2U) {
+        if (!isxdigit((unsigned char)hex_str[i]) || !isxdigit((unsigned char)hex_str[i + 1U])) {
+            return 0;
+        }
+        char pair[3] = { hex_str[i], hex_str[i + 1U], '\0' };
+        out[i / 2U] = (uint8_t)strtoul(pair, NULL, 16);
+    }
+    return slen / 2U;
+}
+
 // Read the full HTTP request body into buf (handles TCP fragmentation and transient timeouts)
 static int recv_req_body_all(httpd_req_t *req, char *buf, size_t max_len) {
     int total_len = req->content_len;
@@ -296,6 +460,9 @@ static cJSON *serialize_equipment_slot_cjson(const equipment_slot_t *slot, uint8
 static esp_err_t root_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_set_hdr(req, "Content-Security-Policy", "frame-ancestors 'none'");
     return httpd_resp_send(req, PAGE_INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -423,7 +590,9 @@ static esp_err_t api_pair_status_get_handler(httpd_req_t *req) {
 
 // POST /api/pair/start - Open 60-second pairing window and generate 6-digit PIN
 static esp_err_t api_pair_start_post_handler(httpd_req_t *req) {
-    set_cors_headers(req);
+    if (!verify_local_ui_request(req, false)) {
+        return ESP_OK;
+    }
     char pin[AUTH_PAIRING_PIN_LEN + 1] = {0};
     uint32_t ttl = 0;
     auth_manager_start_pairing(pin, &ttl);
@@ -545,7 +714,9 @@ static esp_err_t api_pair_claim_post_handler(httpd_req_t *req) {
 
 // POST /api/pair/delete - Delete a paired external client by unique name (or all if omitted/empty)
 static esp_err_t api_pair_delete_post_handler(httpd_req_t *req) {
-    set_cors_headers(req);
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
     char buf[160] = {0};
     int remaining = req->content_len;
     if (remaining < 0 || remaining >= (int)sizeof(buf)) {
@@ -1178,19 +1349,15 @@ static esp_err_t api_wifi_scan_get_handler(httpd_req_t *req) {
 
 // POST /api/wifi/connect - Connect to Wi-Fi SSID
 static esp_err_t api_wifi_connect_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
     char buf[256];
-    int remaining = req->content_len;
-    if (remaining >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
+    int ret = recv_req_body_all(req, buf, sizeof(buf));
+    if (ret <= 0 || !safe_json_nesting_ok(buf, 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
         return ESP_FAIL;
     }
-
-    int ret = httpd_req_recv(req, buf, remaining);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -1240,19 +1407,15 @@ static esp_err_t api_mqtt_get_handler(httpd_req_t *req) {
 
 // POST /api/mqtt - Update MQTT broker configuration
 static esp_err_t api_mqtt_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
     char buf[512];
-    int remaining = req->content_len;
-    if (remaining >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
+    int ret = recv_req_body_all(req, buf, sizeof(buf));
+    if (ret <= 0 || !safe_json_nesting_ok(buf, 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
         return ESP_FAIL;
     }
-
-    int ret = httpd_req_recv(req, buf, remaining);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -1375,19 +1538,15 @@ static esp_err_t api_ble_scan_get_handler(httpd_req_t *req) {
 
 // POST /api/ble/connect - Connect to BLE device by MAC
 static esp_err_t api_ble_connect_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
     char buf[128];
-    int remaining = req->content_len;
-    if (remaining >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
+    int ret = recv_req_body_all(req, buf, sizeof(buf));
+    if (ret <= 0 || !safe_json_nesting_ok(buf, 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
         return ESP_FAIL;
     }
-
-    int ret = httpd_req_recv(req, buf, remaining);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -1429,19 +1588,15 @@ static esp_err_t api_ble_connect_post_handler(httpd_req_t *req) {
 
 // POST /api/ble/disconnect - Disconnect BLE device
 static esp_err_t api_ble_disconnect_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
     char buf[128];
-    int remaining = req->content_len;
-    if (remaining >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
+    int ret = recv_req_body_all(req, buf, sizeof(buf));
+    if (ret <= 0 || !safe_json_nesting_ok(buf, 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
         return ESP_FAIL;
     }
-
-    int ret = httpd_req_recv(req, buf, remaining);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -1546,19 +1701,15 @@ static esp_err_t api_g30_status_get_handler(httpd_req_t *req) {
 
 // POST /api/g30/control - Manual pump, heat, target temp controls
 static esp_err_t api_g30_control_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
     char buf[256];
-    int remaining = req->content_len;
-    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid content length");
+    int ret = recv_req_body_all(req, buf, sizeof(buf));
+    if (ret <= 0 || !safe_json_nesting_ok(buf, 8)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
         return ESP_FAIL;
     }
-
-    int ret = httpd_req_recv(req, buf, remaining);
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     if (root == NULL) {
@@ -1607,6 +1758,9 @@ static void delayed_restart_task(void *pvParameters) {
 }
 
 static esp_err_t api_system_restart_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, false)) {
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"status\":\"ok\",\"message\":\"Rebooting gateway...\"}", HTTPD_RESP_USE_STRLEN);
 
@@ -1636,6 +1790,26 @@ static cJSON *ota_status_to_json(const ota_status_t *st, const char *status_str)
     cJSON_AddStringToObject(root, "message", st->message);
     cJSON_AddStringToObject(root, "last_error", st->last_error);
     cJSON_AddNumberToObject(root, "last_check_time_s", (double)st->last_check_time_s);
+    cJSON_AddBoolToObject(root, "gateway_reachable", st->gateway_reachable);
+    cJSON_AddNumberToObject(root, "check_seq", (double)st->check_seq);
+    cJSON_AddBoolToObject(root, "signature_required", st->signature_required);
+    cJSON_AddBoolToObject(root, "reboot_deferred", st->reboot_deferred);
+
+    bool ota_unlocked = false;
+    uint32_t ota_unlock_rem = 0;
+    auth_manager_get_ota_unlock_status(&ota_unlocked, &ota_unlock_rem);
+    cJSON_AddBoolToObject(root, "ota_unlocked", ota_unlocked);
+    cJSON_AddNumberToObject(root, "ota_unlock_remaining_sec", ota_unlock_rem);
+
+    g30_state_t g30;
+    bool g30_conn = false;
+    memset(&g30, 0, sizeof(g30));
+    g30_controller_get_state(&g30, &g30_conn, NULL, NULL);
+    bool boiler_active = (g30_conn && (g30.heat_active || g30.auto_mode));
+    cJSON_AddBoolToObject(root, "boiler_active", boiler_active);
+    cJSON_AddBoolToObject(root, "boiler_heat_active", g30_conn && g30.heat_active);
+    cJSON_AddBoolToObject(root, "boiler_auto_mode", g30_conn && g30.auto_mode);
+    cJSON_AddNumberToObject(root, "boiler_temp_c", g30_conn ? (double)g30.current_temp_c : 0.0);
 
     cJSON *rel = cJSON_AddObjectToObject(root, "latest_release");
     cJSON_AddBoolToObject(rel, "available", st->latest_release.available);
@@ -1648,6 +1822,7 @@ static cJSON *ota_status_to_json(const ota_status_t *st, const char *status_str)
     cJSON_AddStringToObject(rel, "html_url", st->latest_release.html_url);
     cJSON_AddStringToObject(rel, "asset_name", st->latest_release.asset_name);
     cJSON_AddStringToObject(rel, "download_url", st->latest_release.download_url);
+    cJSON_AddBoolToObject(rel, "has_signature", st->latest_release.sig_download_url[0] != '\0');
     cJSON_AddNumberToObject(rel, "asset_size", (double)st->latest_release.asset_size);
     cJSON_AddStringToObject(rel, "notes", st->latest_release.notes);
     return root;
@@ -1672,123 +1847,135 @@ static esp_err_t send_json_response(httpd_req_t *req, const char *http_status, c
     return ret;
 }
 
+static esp_err_t send_ota_status_response(httpd_req_t *req, const char *http_status,
+                                          const char *status_str, const char *err_msg,
+                                          const char *extra_key, const char *extra_val) {
+    ota_status_t *st = (ota_status_t *)calloc(1, sizeof(ota_status_t));
+    if (!st) {
+        return send_json_response(req, "500 Internal Server Error", NULL);
+    }
+    ota_manager_get_status(st);
+    cJSON *resp = ota_status_to_json(st, status_str);
+    if (resp) {
+        if (err_msg) {
+            cJSON_AddStringToObject(resp, "error", err_msg);
+        } else if (status_str && strcmp(status_str, "error") == 0 && st->last_error[0]) {
+            cJSON_AddStringToObject(resp, "error", st->last_error);
+        }
+        if (extra_key && extra_val) {
+            cJSON_AddStringToObject(resp, extra_key, extra_val);
+        }
+    }
+    free(st);
+    return send_json_response(req, http_status, resp);
+}
+
 // GET /api/ota/status
 static esp_err_t api_ota_status_get_handler(httpd_req_t *req) {
-    ota_status_t st;
-    ota_manager_get_status(&st);
-    return send_json_response(req, "200 OK", ota_status_to_json(&st, "ok"));
+    return send_ota_status_response(req, "200 OK", "ok", NULL, NULL, NULL);
 }
 
-// POST /api/ota/check - Query GitHub Releases for latest version
+// POST /api/ota/check - Query hardcoded official GitHub Releases API asynchronously
 static esp_err_t api_ota_check_post_handler(httpd_req_t *req) {
-    char custom_url[OTA_URL_MAX_LEN] = {0};
-
-    if (req->content_len > 0 && req->content_len < (int)sizeof(custom_url)) {
-        char body[512] = {0};
-        int to_read = (req->content_len < (int)sizeof(body) - 1) ? req->content_len : (int)sizeof(body) - 1;
-        int r = httpd_req_recv(req, body, to_read);
-        if (r > 0) {
-            body[r] = '\0';
-            cJSON *json = cJSON_Parse(body);
-            if (json) {
-                cJSON *u = cJSON_GetObjectItem(json, "releases_url");
-                if (u && cJSON_IsString(u) && u->valuestring) {
-                    snprintf(custom_url, sizeof(custom_url), "%s", u->valuestring);
-                }
-                cJSON_Delete(json);
-            }
-        }
+    if (!verify_local_ui_request(req, false)) {
+        return ESP_OK;
     }
 
-    ota_release_info_t rel;
-    esp_err_t err = ota_manager_check_github_release(custom_url[0] ? custom_url : NULL, &rel);
+    // Drain any small optional body safely; never accept untrusted releases_url (SSRF protection)
+    if (req->content_len > 0 && req->content_len < 256) {
+        char discard[256];
+        recv_req_body_all(req, discard, sizeof(discard));
+    }
 
-    ota_status_t st;
-    ota_manager_get_status(&st);
+    esp_err_t err = ota_manager_start_release_check(NULL);
+
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_ota_status_response(req, "409 Conflict", "error",
+                                        "An OTA check or update is already in progress", NULL, NULL);
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        return send_ota_status_response(req, "429 Too Many Requests", "error",
+                                        "Please wait a few seconds before checking for releases again", NULL, NULL);
+    }
     if (err != ESP_OK) {
-        cJSON *resp = ota_status_to_json(&st, "error");
-        if (resp) {
-            cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : esp_err_to_name(err));
-        }
-        return send_json_response(req, "502 Bad Gateway", resp);
+        return send_ota_status_response(req, "500 Internal Server Error", "error",
+                                        esp_err_to_name(err), NULL, NULL);
     }
 
-    return send_json_response(req, "200 OK", ota_status_to_json(&st, "ok"));
+    return send_ota_status_response(req, "202 Accepted", "ok", NULL, NULL, NULL);
 }
 
-// POST /api/ota/update - Start remote HTTPS OTA update from download_url or cached release
+// POST /api/ota/update - Start remote HTTPS OTA update from gateway-verified cached release
 static esp_err_t api_ota_update_post_handler(httpd_req_t *req) {
-    char download_url[OTA_URL_MAX_LEN] = {0};
+    if (!verify_local_ui_request(req, true)) {
+        return ESP_OK;
+    }
+    if (!verify_ota_authorization(req)) {
+        return ESP_OK;
+    }
+
+    bool force_reboot = false;
+    bool allow_downgrade = false;
 
     if (req->content_len > 0) {
-        if (req->content_len > 1024) {
+        if (req->content_len > 512) {
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
             httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Request body too large\"}", HTTPD_RESP_USE_STRLEN);
             return ESP_FAIL;
         }
-        char body[1025] = {0};
-        int received = 0;
-        while (received < req->content_len) {
-            int r = httpd_req_recv(req, body + received, req->content_len - received);
-            if (r <= 0) {
-                if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-                    continue;
-                }
-                httpd_resp_set_status(req, "400 Bad Request");
-                httpd_resp_set_type(req, "application/json");
-                httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Incomplete JSON payload\"}", HTTPD_RESP_USE_STRLEN);
-                return ESP_FAIL;
-            }
-            received += r;
+        char body[513] = {0};
+        if (recv_req_body_all(req, body, sizeof(body)) <= 0 || !safe_json_nesting_ok(body, 6)) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"status\":\"error\",\"error\":\"Invalid JSON payload\"}", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL;
         }
-        body[received] = '\0';
         cJSON *json = cJSON_Parse(body);
         if (json) {
-            cJSON *u = cJSON_GetObjectItem(json, "download_url");
-            if (u && cJSON_IsString(u) && u->valuestring) {
-                snprintf(download_url, sizeof(download_url), "%s", u->valuestring);
+            cJSON *fr = cJSON_GetObjectItem(json, "force_reboot");
+            if (fr && cJSON_IsBool(fr)) {
+                force_reboot = cJSON_IsTrue(fr);
+            }
+            cJSON *ad = cJSON_GetObjectItem(json, "allow_downgrade");
+            if (ad && cJSON_IsBool(ad)) {
+                allow_downgrade = cJSON_IsTrue(ad);
             }
             cJSON_Delete(json);
         }
     }
 
-    if (download_url[0] == '\0') {
-        ota_status_t st;
-        ota_manager_get_status(&st);
-        if (st.latest_release.download_url[0] != '\0') {
-            snprintf(download_url, sizeof(download_url), "%s", st.latest_release.download_url);
-        }
-    }
-
-    if (download_url[0] == '\0') {
-        cJSON *resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "status", "error");
-        cJSON_AddStringToObject(resp, "error", "No firmware release download URL available; run release check first");
-        return send_json_response(req, "400 Bad Request", resp);
-    }
-
-    esp_err_t err = ota_manager_start_remote_update(download_url);
-    ota_status_t st;
-    ota_manager_get_status(&st);
+    // Never trust client-supplied download_url; exclusively use cached gateway-verified release URL
+    esp_err_t err = ota_manager_start_remote_update_ex(NULL, force_reboot, allow_downgrade);
 
     if (err == ESP_ERR_INVALID_STATE) {
-        cJSON *resp = ota_status_to_json(&st, "error");
-        if (resp) cJSON_AddStringToObject(resp, "error", "An OTA update is already in progress");
-        return send_json_response(req, "409 Conflict", resp);
+        return send_ota_status_response(req, "409 Conflict", "error",
+                                        "An OTA update is already in progress", NULL, NULL);
+    }
+    if (err == ESP_ERR_INVALID_ARG) {
+        return send_ota_status_response(req, "400 Bad Request", "error",
+                                        "No verified GitHub release available; run release check first", NULL, NULL);
     }
     if (err != ESP_OK) {
-        cJSON *resp = ota_status_to_json(&st, "error");
-        if (resp) cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : esp_err_to_name(err));
-        return send_json_response(req, "400 Bad Request", resp);
+        return send_ota_status_response(req, "400 Bad Request", "error",
+                                        NULL, NULL, NULL);
     }
 
-    return send_json_response(req, "200 OK", ota_status_to_json(&st, "ok"));
+    return send_ota_status_response(req, "200 OK", "ok", NULL, NULL, NULL);
 }
 
 // POST /api/ota/upload - Stream manual firmware binary (-firmware.bin or -factory.bin)
 static esp_err_t api_ota_upload_post_handler(httpd_req_t *req) {
+    if (!verify_local_ui_request(req, false)) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+        return (req->content_len > 0) ? ESP_FAIL : ESP_OK;
+    }
+    if (!verify_ota_authorization(req)) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+        return (req->content_len > 0) ? ESP_FAIL : ESP_OK;
+    }
+
     if (req->content_len < (int)OTA_MIN_IMAGE_HEADER_SIZE ||
         req->content_len > (int)(OTA_FACTORY_APP_OFFSET + OTA_MAX_IMAGE_SIZE + 65536U)) {
         httpd_resp_set_hdr(req, "Connection", "close");
@@ -1800,12 +1987,50 @@ static esp_err_t api_ota_upload_post_handler(httpd_req_t *req) {
     }
 
     bool schedule_reboot = true;
-    char query[64] = {0};
+    bool force_reboot = false;
+    bool allow_downgrade = false;
+    char query[96] = {0};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char val[8] = {0};
         if (httpd_query_key_value(query, "reboot", val, sizeof(val)) == ESP_OK && strcmp(val, "0") == 0) {
             schedule_reboot = false;
         }
+        if (httpd_query_key_value(query, "force_reboot", val, sizeof(val)) == ESP_OK && strcmp(val, "1") == 0) {
+            force_reboot = true;
+        }
+        if (httpd_query_key_value(query, "allow_downgrade", val, sizeof(val)) == ESP_OK && strcmp(val, "1") == 0) {
+            allow_downgrade = true;
+        }
+    }
+
+    // Defer auto-reboot if 2000W G30 boiler is actively heating/mashing unless explicitly forced
+    if (schedule_reboot && !force_reboot) {
+        g30_state_t g30;
+        bool g30_conn = false;
+        memset(&g30, 0, sizeof(g30));
+        if (g30_controller_get_state(&g30, &g30_conn, NULL, NULL) == ESP_OK &&
+            g30_conn && (g30.heat_active || g30.auto_mode)) {
+            schedule_reboot = false;
+        }
+    }
+
+    // Parse optional ECDSA-P256 DER hex signature header
+    ota_manager_set_upload_signature(NULL, 0);
+    ota_manager_set_allow_downgrade(allow_downgrade);
+    char sig_hex[(OTA_MAX_SIG_BYTES * 2U) + 2U] = {0};
+    if (httpd_req_get_hdr_value_str(req, "X-Firmware-Signature", sig_hex, sizeof(sig_hex)) == ESP_OK &&
+        sig_hex[0] != '\0') {
+        uint8_t sig_der[OTA_MAX_SIG_BYTES];
+        size_t sig_len = decode_hex_bytes(sig_hex, sig_der, sizeof(sig_der));
+        if (sig_len == 0) {
+            httpd_resp_set_hdr(req, "Connection", "close");
+            cJSON *resp = cJSON_CreateObject();
+            cJSON_AddStringToObject(resp, "status", "error");
+            cJSON_AddStringToObject(resp, "error", "Invalid X-Firmware-Signature hex format");
+            send_json_response(req, "400 Bad Request", resp);
+            return ESP_FAIL;
+        }
+        ota_manager_set_upload_signature(sig_der, sig_len);
     }
 
     const size_t BUF_SZ = 4096U;
@@ -1829,7 +2054,6 @@ static esp_err_t api_ota_upload_post_handler(httpd_req_t *req) {
         size_t want = (remaining > BUF_SZ) ? BUF_SZ : remaining;
         size_t chunk_len = 0;
 
-        // On first chunk, gather at least 512 bytes (if available) for immediate header validation
         do {
             int r = httpd_req_recv(req, (char *)(buf + chunk_len), want - chunk_len);
             if (r == HTTPD_SOCK_ERR_TIMEOUT) {
@@ -1865,17 +2089,11 @@ static esp_err_t api_ota_upload_post_handler(httpd_req_t *req) {
 
         if (err != ESP_OK) {
             free(buf);
-            ota_status_t st;
-            ota_manager_get_status(&st);
             if (remaining > 0) {
                 httpd_resp_set_hdr(req, "Connection", "close");
             }
-            cJSON *resp = ota_status_to_json(&st, "error");
-            if (resp) {
-                cJSON_AddStringToObject(resp, "detected_format", ota_file_format_to_str(img_info.format));
-                cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : "Firmware format verification failed");
-            }
-            send_json_response(req, "400 Bad Request", resp);
+            send_ota_status_response(req, "400 Bad Request", "error", NULL,
+                                     "detected_format", ota_file_format_to_str(img_info.format));
             return (remaining > 0) ? ESP_FAIL : ESP_OK;
         }
     }
@@ -1883,17 +2101,17 @@ static esp_err_t api_ota_upload_post_handler(httpd_req_t *req) {
     free(buf);
 
     esp_err_t ferr = ota_manager_finish_upload(schedule_reboot);
-    ota_status_t st;
-    ota_manager_get_status(&st);
     if (ferr != ESP_OK) {
-        cJSON *resp = ota_status_to_json(&st, "error");
-        if (resp) {
-            cJSON_AddStringToObject(resp, "error", st.last_error[0] ? st.last_error : "Firmware integrity check failed");
-        }
-        return send_json_response(req, "400 Bad Request", resp);
+        return send_ota_status_response(req, "400 Bad Request", "error", NULL, NULL, NULL);
     }
 
-    cJSON *resp = ota_status_to_json(&st, "ok");
+    ota_status_t *st = (ota_status_t *)calloc(1, sizeof(ota_status_t));
+    if (!st) {
+        return send_json_response(req, "500 Internal Server Error", NULL);
+    }
+    ota_manager_get_status(st);
+    cJSON *resp = ota_status_to_json(st, "ok");
+    free(st);
     if (resp) {
         cJSON_AddStringToObject(resp, "uploaded_version", img_info.version);
         cJSON_AddStringToObject(resp, "detected_format", ota_file_format_to_str(img_info.format));
@@ -2023,12 +2241,6 @@ esp_err_t web_server_start(void) {
 
     httpd_uri_t uri_opt_pair_status = {.uri = "/api/pair/status", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
     httpd_register_uri_handler(s_server, &uri_opt_pair_status);
-
-    httpd_uri_t uri_opt_pair_start = {.uri = "/api/pair/start", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
-    httpd_register_uri_handler(s_server, &uri_opt_pair_start);
-
-    httpd_uri_t uri_opt_pair_delete = {.uri = "/api/pair/delete", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
-    httpd_register_uri_handler(s_server, &uri_opt_pair_delete);
 
     httpd_uri_t uri_opt_eq_list = {.uri = "/api/equipment", .method = HTTP_OPTIONS, .handler = api_cors_options_handler};
     httpd_register_uri_handler(s_server, &uri_opt_eq_list);
